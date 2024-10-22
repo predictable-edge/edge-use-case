@@ -249,7 +249,6 @@ bool decode_frames(DecoderInfo decoder_info, std::vector<FrameQueue*>& encoder_q
     int64_t first_pts = AV_NOPTS_VALUE;
     int frame_count = 0;
     int64_t last_packet_pts = AV_NOPTS_VALUE; 
-    bool should_set_decode_start = false;
     std::chrono::steady_clock::time_point decode_start;
     decoder_ctx->flags |= AV_CODEC_FLAG_LOW_DELAY;
     decoder_ctx->max_b_frames = 0;
@@ -268,7 +267,6 @@ bool decode_frames(DecoderInfo decoder_info, std::vector<FrameQueue*>& encoder_q
             }
             if (is_new_frame) {
                 decode_start = std::chrono::steady_clock::now();
-                should_set_decode_start = true;
             }
             int ret = avcodec_send_packet(decoder_ctx, packet);
             if (ret < 0) {
@@ -294,34 +292,25 @@ bool decode_frames(DecoderInfo decoder_info, std::vector<FrameQueue*>& encoder_q
                     std::cout << "First frame PTS: " << first_pts << std::endl;
                 }
 
-                // Clone the frame and push to all encoder queues
-                AVFrame* cloned_frame = av_frame_clone(frame);
-                if (!cloned_frame) {
-                    std::cerr << "Could not clone frame" << std::endl;
-                    break;
-                }
-
-                // Adjust PTS to start from 0
-                cloned_frame->pts -= first_pts;
-
-                FrameData frame_data;
-                frame_data.frame = cloned_frame;
-                if (should_set_decode_start) {
-                    frame_data.decode_start_time = decode_start;
-                    should_set_decode_start = false;
-                } else {
-                    frame_data.decode_start_time = std::chrono::steady_clock::now();
-                }
-                frame_data.decode_end_time = decode_end;
-
-                // Push to each encoder's queue
                 for (auto& q : encoder_queues) {
+                    AVFrame* cloned_frame = av_frame_clone(frame);
+                    if (!cloned_frame) {
+                        std::cerr << "Could not clone frame" << std::endl;
+                        continue;
+                    }
+
+                    cloned_frame->pts -= first_pts;
+
+                    FrameData frame_data;
+                    frame_data.frame = cloned_frame;
+                    frame_data.decode_start_time = decode_start;
+                    frame_data.decode_end_time = decode_end;
                     q->push(frame_data);
                 }
 
                 frame_count++;
                 if (frame_count % 100 == 0) {
-                    std::cout << "Decoded " << frame_count << " frames, current PTS: " << cloned_frame->pts << std::endl;
+                    std::cout << "Decoded " << frame_count << " frames, current PTS: " << frame->pts << std::endl;
                 }
             }
         }
@@ -415,11 +404,11 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
     encoder_ctx->bit_rate = config.bitrate * 1000;       // Convert kbps to bps
     encoder_ctx->gop_size = 30;
     encoder_ctx->max_b_frames = 0;
-    encoder_ctx->thread_count = 8;
+    encoder_ctx->thread_count = 0;
 
     // Set preset and tune options for low latency
     AVDictionary* codec_opts = nullptr;
-    av_dict_set(&codec_opts, "preset", "ultrafast", 0);
+    av_dict_set(&codec_opts, "preset", "veryfast", 0);
     av_dict_set(&codec_opts, "tune", "zerolatency", 0);
 
     // Open encoder with codec options
@@ -675,25 +664,56 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
 }
 
 int main(int argc, char* argv[]) {
-    // Expecting 5 arguments: program, input_url, output1, output2, output3, output4
-    if (argc != 6) {
-        std::cerr << "Usage: " << argv[0] << " <input_srt_url> <output1_srt_url> <output2_srt_url> <output3_srt_url> <output4_srt_url>" << std::endl;
+    // Expecting at least 2 arguments: program, input_url, and at least 1 output_url
+    // Maximum of 6 output URLs supported
+    if (argc < 3 || argc > 7) {
+        std::cerr << "Usage: " << argv[0] 
+                  << " <input_srt_url> <output1_srt_url> [<output2_srt_url> ... <output6_srt_url>]" 
+                  << std::endl;
+        std::cerr << "Supported Resolutions (in order):" << std::endl;
+        std::cerr << "1. 2560x1440" << std::endl;
+        std::cerr << "2. 1920x1080" << std::endl;
+        std::cerr << "3. 1280x720" << std::endl;
+        std::cerr << "4. 854x480" << std::endl;
+        std::cerr << "5. 640x360" << std::endl;
         return 1;
     }
 
     const char* input_url = argv[1];
-    const char* output1_url = argv[2];
-    const char* output2_url = argv[3];
-    const char* output3_url = argv[4];
-    const char* output4_url = argv[5];
+    int num_outputs = argc - 2;
 
-    // Define encoder configurations
-    std::vector<EncoderConfig> encoder_configs = {
-        {output1_url, 2560, 1440, 8000, "frame-2560.log"}, // 2560x1440 with 8000 kbps
-        {output2_url, 1920, 1080, 5000, "frame-1920.log"}, // 1920x1080 with 5000 kbps
-        {output3_url, 1280, 720, 2500, "frame-1280.log"},  // 1280x720 with 2500 kbps
-        {output4_url, 854, 480, 1000, "frame-854.log"}     // 854x480 with 1000 kbps
+    // Define possible resolutions in order
+    struct ResolutionBitrateLog {
+        int width;
+        int height;
+        int bitrate_kbps;
+        std::string log_filename;
     };
+
+    std::vector<ResolutionBitrateLog> resolution_bitrate_log = {
+        {2560, 1440, 8000,  "frame-2560.log"},
+        {1920, 1080, 5000,  "frame-1920.log"},
+        {1280, 720,  2500,  "frame-1280.log"},
+        {854,  480,  1000,  "frame-854.log"},
+        {640,  360,  600,   "frame-640.log"}
+    };
+
+    if (num_outputs > (int) resolution_bitrate_log.size()) {
+        std::cerr << "Error: Maximum supported output URLs is " << resolution_bitrate_log.size() << "." << std::endl;
+        return 1;
+    }
+
+    // Define encoder configurations based on the number of output URLs
+    std::vector<EncoderConfig> encoder_configs;
+    for (int i = 0; i < num_outputs; ++i) {
+        EncoderConfig config;
+        config.output_url = argv[2 + i];
+        config.width = resolution_bitrate_log[i].width;
+        config.height = resolution_bitrate_log[i].height;
+        config.bitrate = resolution_bitrate_log[i].bitrate_kbps;
+        config.log_filename = resolution_bitrate_log[i].log_filename;
+        encoder_configs.push_back(config);
+    }
 
     // Initialize FFmpeg
     avformat_network_init();
@@ -704,10 +724,7 @@ int main(int argc, char* argv[]) {
         frame_queues.push_back(new FrameQueue());
     }
 
-    // Initialize TimingLogger for each encoder is handled inside encoder threads
-
     std::atomic<bool> decode_finished(false);
-    std::atomic<bool> encode_finished_flag(false);
 
     // Initialize decoder
     DecoderInfo decoder_info;
