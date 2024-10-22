@@ -543,7 +543,7 @@ void* pull_stream(void* args) {
     }
 
     AVCodecParameters* codecpar = input_fmt_ctx->streams[video_stream_index]->codecpar;
-    AVCodec* codec = avcodec_find_decoder(codecpar->codec_id);
+    const AVCodec* codec = avcodec_find_decoder(codecpar->codec_id);
     if (!codec) {
         pthread_mutex_lock(&cout_mutex);
         std::cerr << "[Pull Thread " << index << "] Could not find the decoder" << std::endl;
@@ -713,7 +713,7 @@ void* push_stream(void* args) {
         exit(1);
     }
 
-    AVCodec* video_decoder = avcodec_find_decoder(input_fmt_ctx->streams[video_stream_idx]->codecpar->codec_id);
+    const AVCodec* video_decoder = avcodec_find_decoder(input_fmt_ctx->streams[video_stream_idx]->codecpar->codec_id);
     if (!video_decoder) {
         fprintf(stderr, "[Push Thread] Necessary video decoder not found.\n");
         exit(1);
@@ -745,7 +745,7 @@ void* push_stream(void* args) {
         exit(1);
     }
 
-    AVCodec* video_encoder = avcodec_find_encoder(AV_CODEC_ID_H264);
+    const AVCodec* video_encoder = avcodec_find_encoder(AV_CODEC_ID_H264);
     if (!video_encoder) {
         fprintf(stderr, "[Push Thread] Necessary video encoder not found.\n");
         exit(1);
