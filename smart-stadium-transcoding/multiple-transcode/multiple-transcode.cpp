@@ -58,6 +58,11 @@ public:
         return true;
     }
 
+    size_t size() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return queue_.size();
+    }
+
     bool is_empty() {
         return queue_.empty();
     }
@@ -219,7 +224,7 @@ bool initialize_decoder(const char* input_url, DecoderInfo& decoder_info) {
         avformat_close_input(&decoder_info.input_fmt_ctx);
         return false;
     }
-    decoder_info.decoder_ctx->thread_count = 4;
+    decoder_info.decoder_ctx->thread_count = 0;
     decoder_info.decoder_ctx->thread_type = FF_THREAD_SLICE;
 
     // Store input stream's time_base
@@ -408,7 +413,7 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
 
     // Set preset and tune options for low latency
     AVDictionary* codec_opts = nullptr;
-    av_dict_set(&codec_opts, "preset", "veryfast", 0);
+    av_dict_set(&codec_opts, "preset", "ultrafast", 0);
     av_dict_set(&codec_opts, "tune", "zerolatency", 0);
 
     // Open encoder with codec options
@@ -603,7 +608,7 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
         logger.add_entry(frame_count, decode_time, encode_time, interval_time);
 
         if (frame_count % 100 == 0) {
-            std::cout << "Encoded " << frame_count << " frames for " << config.output_url << ", current PTS: " << enc_frame->pts << std::endl;
+            std::cout << "Encoded " << frame_count << " frames for " << config.output_url << ", queue length: " << frame_queue.size() << std::endl;
         }
 
         av_frame_free(&frame_data.frame);
