@@ -13,7 +13,7 @@ TARGET := video-push-pull
 # Source Files
 SRCS := video-push-pull.cpp
 
-RESULT := frame.log
+RESULT := frame*
 
 # Object Files
 OBJS := $(SRCS:.cpp=.o)
