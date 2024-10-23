@@ -30,6 +30,18 @@ std::string get_error_text(int errnum) {
     return std::string(errbuf);
 }
 
+std::string get_timestamp_with_ms() {
+    auto now = std::chrono::system_clock::now();
+    auto ms_part = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
+    auto now_time_t = std::chrono::system_clock::to_time_t(now);
+    std::tm* now_tm = std::localtime(&now_time_t);
+    char buffer[20];
+    std::strftime(buffer, sizeof(buffer), "%Y%m%d-%H%M%S", now_tm);
+    std::ostringstream oss;
+    oss << buffer << std::setw(3) << std::setfill('0') << ms_part.count();
+    return oss.str();
+}
+
 // Structure to hold frame data and timing information
 struct FrameData {
     AVFrame* frame;
@@ -145,6 +157,7 @@ struct DecoderInfo {
     AVCodecContext* decoder_ctx;
     int video_stream_idx;
     AVRational input_time_base;
+    double input_framerate;
 };
 
 // Structure to define encoder configurations
@@ -154,6 +167,7 @@ struct EncoderConfig {
     int height;
     int bitrate; // in kbps
     std::string log_filename;
+    double framerate;
 };
 
 // Decoder Initialization and Function
@@ -230,6 +244,17 @@ bool initialize_decoder(const char* input_url, DecoderInfo& decoder_info) {
     // Store input stream's time_base
     decoder_info.input_time_base = decoder_info.input_fmt_ctx->streams[decoder_info.video_stream_idx]->time_base;
 
+    AVRational frame_rate_rational = av_guess_frame_rate(decoder_info.input_fmt_ctx, 
+                                                         decoder_info.input_fmt_ctx->streams[decoder_info.video_stream_idx], 
+                                                         nullptr);
+    if (frame_rate_rational.num == 0 || frame_rate_rational.den == 0) {
+        decoder_info.input_framerate = 30.0;
+        std::cerr << "Warning: Could not determine input frame rate. Using default 30 FPS." << std::endl;
+    } else {
+        decoder_info.input_framerate = av_q2d(frame_rate_rational);
+    }
+
+    std::cout << "Input frame rate: " << decoder_info.input_framerate << " FPS" << std::endl;
     std::cout << "Decoder initialized successfully." << std::endl;
     return true;
 }
@@ -404,10 +429,10 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
     encoder_ctx->width = config.width;
     encoder_ctx->sample_aspect_ratio = AVRational{1, 1}; // Square pixels
     encoder_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
-    encoder_ctx->time_base = AVRational{1, 30};          // 30 fps
-    encoder_ctx->framerate = AVRational{30, 1};
-    encoder_ctx->bit_rate = config.bitrate * 1000;       // Convert kbps to bps
-    encoder_ctx->gop_size = 30;
+    encoder_ctx->time_base = AVRational{1, static_cast<int>(config.framerate)};          // 30 fps
+    encoder_ctx->framerate = AVRational{static_cast<int>(config.framerate), 1};
+    encoder_ctx->bit_rate = static_cast<int>(config.bitrate * 1000 * 30 / config.framerate);       // Convert kbps to bps
+    encoder_ctx->gop_size = static_cast<int>(config.framerate);
     encoder_ctx->max_b_frames = 0;
     encoder_ctx->thread_count = 0;
 
@@ -696,11 +721,11 @@ int main(int argc, char* argv[]) {
     };
 
     std::vector<ResolutionBitrateLog> resolution_bitrate_log = {
-        {2560, 1440, 8000,  "frame-2560.log"},
-        {1920, 1080, 5000,  "frame-1920.log"},
-        {1280, 720,  2500,  "frame-1280.log"},
-        {854,  480,  1000,  "frame-854.log"},
-        {640,  360,  600,   "frame-640.log"}
+        {2560, 1440, 8000,  "frame-2560-"},
+        {1920, 1080, 5000,  "frame-1920-"},
+        {1280, 720,  2500,  "frame-1280-"},
+        {854,  480,  1000,  "frame-854-"},
+        {640,  360,  600,   "frame-640-"}
     };
 
     if (num_outputs > (int) resolution_bitrate_log.size()) {
@@ -709,25 +734,9 @@ int main(int argc, char* argv[]) {
     }
 
     // Define encoder configurations based on the number of output URLs
-    std::vector<EncoderConfig> encoder_configs;
-    for (int i = 0; i < num_outputs; ++i) {
-        EncoderConfig config;
-        config.output_url = argv[2 + i];
-        config.width = resolution_bitrate_log[i].width;
-        config.height = resolution_bitrate_log[i].height;
-        config.bitrate = resolution_bitrate_log[i].bitrate_kbps;
-        config.log_filename = resolution_bitrate_log[i].log_filename;
-        encoder_configs.push_back(config);
-    }
 
     // Initialize FFmpeg
     avformat_network_init();
-
-    // Prepare frame queues for each encoder
-    std::vector<FrameQueue*> frame_queues;
-    for (size_t i = 0; i < encoder_configs.size(); ++i) {
-        frame_queues.push_back(new FrameQueue());
-    }
 
     std::atomic<bool> decode_finished(false);
 
@@ -737,6 +746,24 @@ int main(int argc, char* argv[]) {
         std::cerr << "Decoder initialization failed" << std::endl;
         avformat_network_deinit();
         return 1;
+    }
+
+    std::vector<EncoderConfig> encoder_configs;
+    for (int i = 0; i < num_outputs; ++i) {
+        EncoderConfig config;
+        config.output_url = argv[2 + i];
+        config.width = resolution_bitrate_log[i].width;
+        config.height = resolution_bitrate_log[i].height;
+        config.bitrate = resolution_bitrate_log[i].bitrate_kbps;
+        config.log_filename = resolution_bitrate_log[i].log_filename + get_timestamp_with_ms() + ".log";
+        config.framerate = decoder_info.input_framerate;
+        encoder_configs.push_back(config);
+    }
+
+    // Prepare frame queues for each encoder
+    std::vector<FrameQueue*> frame_queues;
+    for (size_t i = 0; i < encoder_configs.size(); ++i) {
+        frame_queues.push_back(new FrameQueue());
     }
 
     // Start decoder thread
