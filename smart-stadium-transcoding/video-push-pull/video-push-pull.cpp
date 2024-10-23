@@ -54,6 +54,18 @@ int64_t get_current_time_us() {
     return ((int64_t)tv.tv_sec * 1000000) + tv.tv_usec;
 }
 
+std::string get_timestamp_with_ms() {
+    auto now = std::chrono::system_clock::now();
+    auto ms_part = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
+    auto now_time_t = std::chrono::system_clock::to_time_t(now);
+    std::tm* now_tm = std::localtime(&now_time_t);
+    char buffer[20];
+    std::strftime(buffer, sizeof(buffer), "%Y%m%d-%H%M%S", now_tm);
+    std::ostringstream oss;
+    oss << buffer << std::setw(3) << std::setfill('0') << ms_part.count();
+    return oss.str();
+}
+
 // TimingLogger class for thread-safe logging
 class TimingLogger {
 public:
@@ -478,7 +490,7 @@ void* pull_stream(void* args) {
 
     // Create a TimingLogger instance for this pull thread
     std::stringstream ss;
-    ss << "frame-" << index << ".log";
+    ss << "frame-" << index << "-" << get_timestamp_with_ms() << ".log";
     std::string log_filename = ss.str();
     TimingLogger logger(log_filename);
 
@@ -768,8 +780,9 @@ void* push_stream(void* args) {
     }
     video_enc_ctx->framerate = input_frame_rate;
     video_enc_ctx->time_base = av_inv_q(video_enc_ctx->framerate);
-    video_enc_ctx->bit_rate = 10000 * 1000;
-    video_enc_ctx->gop_size = 30;
+    double frame_rate = av_q2d(input_frame_rate);
+    video_enc_ctx->bit_rate = static_cast<int>(5000 * 1000 * 30 / frame_rate);
+    video_enc_ctx->gop_size = static_cast<int>(frame_rate);
     out_video_stream->time_base = (AVRational){1, 1000};
     out_video_stream->avg_frame_rate = input_frame_rate;
     out_video_stream->r_frame_rate = input_frame_rate;
