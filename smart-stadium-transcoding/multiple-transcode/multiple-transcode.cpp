@@ -438,7 +438,7 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
 
     // Set preset and tune options for low latency
     AVDictionary* codec_opts = nullptr;
-    av_dict_set(&codec_opts, "preset", "ultrafast", 0);
+    av_dict_set(&codec_opts, "preset", "veryfast", 0);
     av_dict_set(&codec_opts, "tune", "zerolatency", 0);
 
     // Open encoder with codec options
