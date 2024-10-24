@@ -695,6 +695,157 @@ void* pull_stream(void* args) {
     return nullptr;
 }
 
+void* push_stream_directly(void* args) {
+    char **my_args = (char **)args;
+    char *input_filename = my_args[0];
+    char *output_url = my_args[1];
+
+    pthread_mutex_lock(&cout_mutex);
+    printf("[Push Thread] Starting push_stream...\n");
+    pthread_mutex_unlock(&cout_mutex);
+
+    AVFormatContext* input_fmt_ctx = NULL;
+    int ret = avformat_open_input(&input_fmt_ctx, input_filename, NULL, NULL);
+    CHECK_ERR(ret, "Could not open input file for push_stream");
+
+    ret = avformat_find_stream_info(input_fmt_ctx, NULL);
+    CHECK_ERR(ret, "Failed to retrieve input stream information for push_stream");
+
+    int video_stream_idx = -1;
+    for (unsigned int i = 0; i < input_fmt_ctx->nb_streams; i++) {
+        if (input_fmt_ctx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+            video_stream_idx = i;
+            break;
+        }
+    }
+
+    if (video_stream_idx == -1) {
+        fprintf(stderr, "[Push Thread] Could not find a video stream in the input.\n");
+        exit(1);
+    }
+
+    AVCodecParameters* codecpar = input_fmt_ctx->streams[video_stream_idx]->codecpar;
+
+    // Allocate output format context
+    AVFormatContext* output_fmt_ctx = NULL;
+    ret = avformat_alloc_output_context2(&output_fmt_ctx, NULL, "flv", output_url);
+    if (!output_fmt_ctx) {
+        fprintf(stderr, "[Push Thread] Could not create output context.\n");
+        exit(1);
+    }
+
+    // Create new stream for output
+    AVStream* out_stream = avformat_new_stream(output_fmt_ctx, NULL);
+    if (!out_stream) {
+        fprintf(stderr, "[Push Thread] Failed allocating output stream.\n");
+        exit(1);
+    }
+
+    // Copy codec parameters from input to output
+    ret = avcodec_parameters_copy(out_stream->codecpar, codecpar);
+    CHECK_ERR(ret, "Failed to copy codec parameters to output stream");
+
+    out_stream->codecpar->codec_tag = 0;
+
+    // Set up SRT options
+    AVDictionary* srt_options = NULL;
+    av_dict_set(&srt_options, "mode", "caller", 0);
+    av_dict_set(&srt_options, "streamid", "live", 0);
+    av_dict_set(&srt_options, "latency", "0", 0);
+    av_dict_set(&srt_options, "buffer_size", "1000000", 0);
+
+    // Open output URL
+    ret = avio_open2(&output_fmt_ctx->pb, output_url, AVIO_FLAG_WRITE, NULL, &srt_options);
+    CHECK_ERR(ret, "Could not open output URL");
+
+    // Write header
+    ret = avformat_write_header(output_fmt_ctx, NULL);
+    CHECK_ERR(ret, "Error occurred when writing header to output");
+
+    AVPacket* packet = av_packet_alloc();
+    if (!packet) {
+        fprintf(stderr, "[Push Thread] Could not allocate packet.\n");
+        exit(1);
+    }
+
+    // Get the stream's time base
+    AVRational time_base = input_fmt_ctx->streams[video_stream_idx]->time_base;
+
+    // Record the start time
+    auto start_time = av_gettime();
+    int64_t frame_count = 0;
+    while (av_read_frame(input_fmt_ctx, packet) >= 0) {
+        if (packet->stream_index == video_stream_idx) {
+            // Rescale packet timestamps
+            packet->stream_index = out_stream->index;
+            int64_t pts = packet->pts;
+            if (pts == AV_NOPTS_VALUE) {
+                pts = packet->dts;
+            }
+            if (pts == AV_NOPTS_VALUE) {
+                fprintf(stderr, "Packet has no valid pts or dts.\n");
+                continue;
+            }
+
+            int64_t pts_time = av_rescale_q(pts, time_base, AV_TIME_BASE_Q);
+            av_packet_rescale_ts(packet, time_base, out_stream->time_base);
+            // Calculate the expected send time
+            int64_t now = av_gettime() - start_time;
+
+            if (pts_time > now) {
+                int64_t sleep_time = pts_time - now;
+                if (sleep_time > 0) {
+                    int ret = av_usleep(sleep_time);
+                    if (ret < 0) {
+                        pthread_mutex_lock(&cout_mutex);
+                        fprintf(stderr, "[Push Thread] av_usleep was interrupted.\n");
+                        pthread_mutex_unlock(&cout_mutex);
+                    }
+                }
+            }
+
+            // Write packet
+            int64_t push_time_ms = get_current_time_us() / 1000;
+            push_timestamps[frame_count] = push_time_ms;
+            push_timestamps_after_enc[frame_count] = push_time_ms;
+            ret = av_interleaved_write_frame(output_fmt_ctx, packet);
+            if (ret < 0) {
+                pthread_mutex_lock(&cout_mutex);
+                char errbuf[AV_ERROR_MAX_STRING_SIZE];
+                av_strerror(ret, errbuf, sizeof(errbuf));
+                fprintf(stderr, "[Push Thread] Error muxing packet: %s\n", errbuf);
+                pthread_mutex_unlock(&cout_mutex);
+                break;
+            }
+            frame_count++;
+        }
+        av_packet_unref(packet);
+    }
+
+    // Write trailer
+    ret = av_write_trailer(output_fmt_ctx);
+    if (ret < 0) {
+        pthread_mutex_lock(&cout_mutex);
+        char errbuf[AV_ERROR_MAX_STRING_SIZE];
+        av_strerror(ret, errbuf, sizeof(errbuf));
+        fprintf(stderr, "[Push Thread] Error writing trailer: %s\n", errbuf);
+        pthread_mutex_unlock(&cout_mutex);
+    }
+
+    av_packet_free(&packet);
+    if (!(output_fmt_ctx->oformat->flags & AVFMT_NOFILE)) {
+        avio_closep(&output_fmt_ctx->pb);
+    }
+    avformat_free_context(output_fmt_ctx);
+    avformat_close_input(&input_fmt_ctx);
+
+    pthread_mutex_lock(&cout_mutex);
+    printf("[Push Thread] Finished push_stream.\n");
+    pthread_mutex_unlock(&cout_mutex);
+
+    return NULL;
+}
+
 // Modified push_stream function remains largely unchanged
 void* push_stream(void* args) {
     char **my_args = (char **)args;
@@ -941,7 +1092,13 @@ int main(int argc, char* argv[]) {
     // Optionally, wait for a few seconds before starting push
     sleep(5);
 
-    int ret_create = pthread_create(&push_thread_id, NULL, push_stream, push_args);
+    // int ret_create = pthread_create(&push_thread_id, NULL, push_stream, push_args);
+    // if (ret_create != 0) {
+    //     fprintf(stderr, "Failed to create push thread.\n");
+    //     exit(1);
+    // }
+
+    int ret_create = pthread_create(&push_thread_id, NULL, push_stream_directly, push_args);
     if (ret_create != 0) {
         fprintf(stderr, "Failed to create push thread.\n");
         exit(1);

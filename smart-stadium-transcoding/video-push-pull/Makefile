@@ -33,5 +33,8 @@ $(TARGET): $(OBJS)
 clean:
 	rm -f $(OBJS) $(TARGET) $(RESULT)
 
+clog:
+	rm -f $(RESULT)
+
 # Phony Targets
 .PHONY: all clean
