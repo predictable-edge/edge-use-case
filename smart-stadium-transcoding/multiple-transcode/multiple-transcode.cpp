@@ -42,6 +42,12 @@ std::string get_timestamp_with_ms() {
     return oss.str();
 }
 
+int64_t get_current_time_us() {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return ((int64_t)tv.tv_sec * 1000000) + tv.tv_usec;
+}
+
 // Structure to hold frame data and timing information
 struct FrameData {
     AVFrame* frame;
@@ -92,6 +98,43 @@ public:
 private:
     std::queue<FrameData> queue_;
     mutable std::mutex mutex_;
+    std::condition_variable cond_var_;
+    bool finished_ = false;
+};
+
+// Thread-safe queue for AVPacket*
+class PacketQueue {
+public:
+    void push(AVPacket* packet) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        queue_.push(packet);
+        cond_var_.notify_one();
+    }
+
+    bool pop(AVPacket*& packet) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        while (queue_.empty() && !finished_) {
+            cond_var_.wait(lock);
+        }
+        if (queue_.empty()) return false;
+        packet = queue_.front();
+        queue_.pop();
+        return true;
+    }
+
+    bool is_empty() {
+        return queue_.empty();
+    }
+
+    void set_finished() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        finished_ = true;
+        cond_var_.notify_all();
+    }
+
+private:
+    std::queue<AVPacket*> queue_;
+    std::mutex mutex_;
     std::condition_variable cond_var_;
     bool finished_ = false;
 };
@@ -176,7 +219,7 @@ bool initialize_decoder(const char* input_url, DecoderInfo& decoder_info) {
     decoder_info.input_fmt_ctx = nullptr;
     AVDictionary* format_opts = nullptr;
     av_dict_set(&format_opts, "latency", "0", 0);         // Latency in ms 
-    av_dict_set(&format_opts, "buffer_size", "1000000", 0);
+    // av_dict_set(&format_opts, "buffer_size", "20000000", 0);
     if (avformat_open_input(&decoder_info.input_fmt_ctx, input_url, nullptr, &format_opts) < 0) {
         std::cerr << "Could not open input SRT stream: " << input_url << std::endl;
         av_dict_free(&format_opts);
@@ -238,7 +281,7 @@ bool initialize_decoder(const char* input_url, DecoderInfo& decoder_info) {
         avformat_close_input(&decoder_info.input_fmt_ctx);
         return false;
     }
-    decoder_info.decoder_ctx->thread_count = 0;
+    decoder_info.decoder_ctx->thread_count = 8;
     decoder_info.decoder_ctx->thread_type = FF_THREAD_SLICE;
 
     // Store input stream's time_base
@@ -260,125 +303,253 @@ bool initialize_decoder(const char* input_url, DecoderInfo& decoder_info) {
 }
 
 // Decoder Function
-bool decode_frames(DecoderInfo decoder_info, std::vector<FrameQueue*>& encoder_queues, std::atomic<bool>& decode_finished) {
-    AVFormatContext* input_fmt_ctx = decoder_info.input_fmt_ctx;
-    AVCodecContext* decoder_ctx = decoder_info.decoder_ctx;
-    int video_stream_idx = decoder_info.video_stream_idx;
-
+void packet_reading_thread(AVFormatContext* input_fmt_ctx, int video_stream_idx, PacketQueue& packet_queue) {
     AVPacket* packet = av_packet_alloc();
-    AVFrame* frame = av_frame_alloc();
-    if (!packet || !frame) {
-        std::cerr << "Could not allocate packet or frame in decoder" << std::endl;
-        if (packet) av_packet_free(&packet);
-        if (frame) av_frame_free(&frame);
-        avcodec_free_context(&decoder_ctx);
-        avformat_close_input(&input_fmt_ctx);
-        return false;
+    if (!packet) {
+        std::cerr << "Could not allocate AVPacket" << std::endl;
+        packet_queue.set_finished();
+        return;
     }
 
-    int64_t first_pts = AV_NOPTS_VALUE;
-    int frame_count = 0;
-    int64_t last_packet_pts = AV_NOPTS_VALUE; 
-    std::chrono::steady_clock::time_point decode_start;
-    decoder_ctx->flags |= AV_CODEC_FLAG_LOW_DELAY;
-    decoder_ctx->max_b_frames = 0;
+    while (true) {
+        int ret = av_read_frame(input_fmt_ctx, packet);
+        if (ret < 0) {
+            if (ret == AVERROR_EOF) break;
+            std::cerr << "Error reading frame: " << get_error_text(ret) << std::endl;
+            break;
+        }
 
-    while (av_read_frame(input_fmt_ctx, packet) >= 0) {
         if (packet->stream_index == video_stream_idx) {
-            bool is_new_frame = false;
-            if (packet->pts != AV_NOPTS_VALUE) {
-                if (packet->pts != last_packet_pts) {
-                    is_new_frame = true;
-                    last_packet_pts = packet->pts;
-                }
-            }
-            else if (packet->flags & AV_PKT_FLAG_KEY) {
-                is_new_frame = true;
-            }
-            if (is_new_frame) {
-                decode_start = std::chrono::steady_clock::now();
-            }
-            int ret = avcodec_send_packet(decoder_ctx, packet);
-            if (ret < 0) {
-                std::cerr << "Error sending packet to decoder: " << get_error_text(ret) << std::endl;
-                av_packet_unref(packet);
+            packet_queue.push(packet);
+            packet = av_packet_alloc();
+            if (!packet) {
+                std::cerr << "Could not allocate AVPacket" << std::endl;
                 break;
             }
-
-            while (ret >= 0) {
-                ret = avcodec_receive_frame(decoder_ctx, frame);
-                if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
-                    break;
-                }
-                else if (ret < 0) {
-                    std::cerr << "Error during decoding: " << get_error_text(ret) << std::endl;
-                    break;
-                }
-
-                auto decode_end = std::chrono::steady_clock::now();
-
-                if (first_pts == AV_NOPTS_VALUE) {
-                    first_pts = frame->pts;
-                    std::cout << "First frame PTS: " << first_pts << std::endl;
-                }
-
-                for (auto& q : encoder_queues) {
-                    AVFrame* cloned_frame = av_frame_clone(frame);
-                    if (!cloned_frame) {
-                        std::cerr << "Could not clone frame" << std::endl;
-                        continue;
-                    }
-
-                    cloned_frame->pts -= first_pts;
-
-                    FrameData frame_data;
-                    frame_data.frame = cloned_frame;
-                    frame_data.decode_start_time = decode_start;
-                    frame_data.decode_end_time = decode_end;
-                    q->push(frame_data);
-                }
-
-                frame_count++;
-                if (frame_count % 100 == 0) {
-                    std::cout << "Decoded " << frame_count << " frames, current PTS: " << frame->pts << std::endl;
-                }
-            }
+        } else {
+            av_packet_unref(packet);
         }
-        av_packet_unref(packet);
+    }
+
+    packet_queue.set_finished();
+    av_packet_free(&packet);
+}
+
+void decoding_thread(AVCodecContext* decoder_ctx, PacketQueue& packet_queue, const std::vector<FrameQueue*>& encoder_queues) {
+    AVPacket* packet = nullptr;
+    AVFrame* frame = av_frame_alloc();
+    if (!frame) {
+        std::cerr << "Could not allocate AVFrame" << std::endl;
+        for (auto& q : encoder_queues) q->set_finished();
+        return;
+    }
+
+    while (packet_queue.pop(packet)) {
+        std::cout << "Pop: " << get_current_time_us() / 1000 << std::endl;
+        auto decode_start = std::chrono::steady_clock::now();
+        int ret = avcodec_send_packet(decoder_ctx, packet);
+        av_packet_free(&packet);
+        std::cout << "zx:" << get_current_time_us() / 1000 << std::endl;
+        if (ret < 0) {
+            std::cerr << "Error sending packet to decoder: " << get_error_text(ret) << std::endl;
+            continue;
+        }
+        std::cout << "zx1:" << get_current_time_us() / 1000 << std::endl;
+
+        while (ret >= 0) {
+            std::cout << "Try frame: " << get_current_time_us() / 1000 << std::endl;
+            ret = avcodec_receive_frame(decoder_ctx, frame);
+            if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
+                break;
+            }
+            else if (ret < 0) {
+                std::cerr << "Error receiving frame from decoder: " << get_error_text(ret) << std::endl;
+                break;
+            }
+            std::cout << "Frame: " << get_current_time_us() / 1000 << std::endl;
+
+            auto decode_end = std::chrono::steady_clock::now();
+
+            for (auto& q : encoder_queues) {
+                AVFrame* cloned_frame = av_frame_clone(frame);
+                if (!cloned_frame) {
+                    std::cerr << "Could not clone frame" << std::endl;
+                    continue;
+                }
+                FrameData frame_data;
+                frame_data.frame = cloned_frame;
+                frame_data.decode_start_time = decode_start;
+                frame_data.decode_end_time = decode_end;
+                q->push(frame_data);
+            }
+            av_frame_unref(frame);
+        }
     }
 
     // Flush decoder
     avcodec_send_packet(decoder_ctx, nullptr);
-    while (avcodec_receive_frame(decoder_ctx, frame) == 0) {
-        AVFrame* cloned_frame = av_frame_clone(frame);
-        if (cloned_frame) {
+    while (true) {
+        int ret = avcodec_receive_frame(decoder_ctx, frame);
+        if (ret == AVERROR_EOF || ret == AVERROR(EAGAIN)) break;
+        if (ret < 0) {
+            std::cerr << "Error flushing decoder: " << get_error_text(ret) << std::endl;
+            break;
+        }
+
+        for (auto& q : encoder_queues) {
+            AVFrame* cloned_frame = av_frame_clone(frame);
+            if (!cloned_frame) {
+                std::cerr << "Could not clone frame" << std::endl;
+                continue;
+            }
             FrameData frame_data;
             frame_data.frame = cloned_frame;
-            // No packet received during flushing, so we set decode times to end of decoding
-            frame_data.decode_start_time = std::chrono::steady_clock::now();
-            frame_data.decode_end_time = frame_data.decode_start_time;
-            // Push to each encoder's queue
-            for (auto& q : encoder_queues) {
-                q->push(frame_data);
-            }
+            frame_data.decode_start_time = std::chrono::steady_clock::now();;
+            frame_data.decode_end_time = std::chrono::steady_clock::now();;
+            q->push(frame_data);
         }
+        av_frame_unref(frame);
     }
 
-    // Clean up decoder resources
-    av_packet_free(&packet);
+    for (auto& q : encoder_queues) q->set_finished();
     av_frame_free(&frame);
-    avcodec_free_context(&decoder_ctx);
-    avformat_close_input(&input_fmt_ctx);
+}
+
+bool decode_frames(DecoderInfo decoder_info, std::vector<FrameQueue*>& encoder_queues, std::atomic<bool>& decode_finished) {
+    PacketQueue packet_queue;
+    std::atomic<bool> encoding_finished(false);
+    std::vector<std::thread> encoder_threads;
+
+    std::thread reader(packet_reading_thread, decoder_info.input_fmt_ctx, decoder_info.video_stream_idx, std::ref(packet_queue));
+    std::thread decoder(decoding_thread, decoder_info.decoder_ctx, std::ref(packet_queue), std::ref(encoder_queues));
+
+    reader.join();
+    decoder.join();
+
     decode_finished = true;
-
-    // Notify all encoder queues that decoding is finished
-    for (auto& q : encoder_queues) {
-        q->set_finished();
-    }
-
     std::cout << "Decoding finished." << std::endl;
     return true;
 }
+
+// bool decode_frames(DecoderInfo decoder_info, std::vector<FrameQueue*>& encoder_queues, std::atomic<bool>& decode_finished) {
+//     AVFormatContext* input_fmt_ctx = decoder_info.input_fmt_ctx;
+//     AVCodecContext* decoder_ctx = decoder_info.decoder_ctx;
+//     int video_stream_idx = decoder_info.video_stream_idx;
+
+//     AVPacket* packet = av_packet_alloc();
+//     AVFrame* frame = av_frame_alloc();
+//     if (!packet || !frame) {
+//         std::cerr << "Could not allocate packet or frame in decoder" << std::endl;
+//         if (packet) av_packet_free(&packet);
+//         if (frame) av_frame_free(&frame);
+//         avcodec_free_context(&decoder_ctx);
+//         avformat_close_input(&input_fmt_ctx);
+//         return false;
+//     }
+
+//     int64_t first_pts = AV_NOPTS_VALUE;
+//     int frame_count = 0;
+//     int64_t last_packet_pts = AV_NOPTS_VALUE; 
+//     std::chrono::steady_clock::time_point decode_start;
+//     decoder_ctx->flags |= AV_CODEC_FLAG_LOW_DELAY;
+//     decoder_ctx->max_b_frames = 0;
+
+//     while (av_read_frame(input_fmt_ctx, packet) >= 0) {
+//         if (packet->stream_index == video_stream_idx) {
+//             bool is_new_frame = false;
+//             if (packet->pts != AV_NOPTS_VALUE) {
+//                 if (packet->pts != last_packet_pts) {
+//                     is_new_frame = true;
+//                     last_packet_pts = packet->pts;
+//                 }
+//             }
+//             else if (packet->flags & AV_PKT_FLAG_KEY) {
+//                 is_new_frame = true;
+//             }
+//             if (is_new_frame) {
+//                 decode_start = std::chrono::steady_clock::now();
+//             }
+//             int ret = avcodec_send_packet(decoder_ctx, packet);
+//             if (ret < 0) {
+//                 std::cerr << "Error sending packet to decoder: " << get_error_text(ret) << std::endl;
+//                 av_packet_unref(packet);
+//                 break;
+//             }
+
+//             while (ret >= 0) {
+//                 ret = avcodec_receive_frame(decoder_ctx, frame);
+//                 if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
+//                     break;
+//                 }
+//                 else if (ret < 0) {
+//                     std::cerr << "Error during decoding: " << get_error_text(ret) << std::endl;
+//                     break;
+//                 }
+
+//                 auto decode_end = std::chrono::steady_clock::now();
+
+//                 if (first_pts == AV_NOPTS_VALUE) {
+//                     first_pts = frame->pts;
+//                     std::cout << "First frame PTS: " << first_pts << std::endl;
+//                 }
+
+//                 for (auto& q : encoder_queues) {
+//                     AVFrame* cloned_frame = av_frame_clone(frame);
+//                     if (!cloned_frame) {
+//                         std::cerr << "Could not clone frame" << std::endl;
+//                         continue;
+//                     }
+
+//                     cloned_frame->pts -= first_pts;
+
+//                     FrameData frame_data;
+//                     frame_data.frame = cloned_frame;
+//                     frame_data.decode_start_time = decode_start;
+//                     frame_data.decode_end_time = decode_end;
+//                     q->push(frame_data);
+//                 }
+
+//                 frame_count++;
+//                 if (frame_count % 100 == 0) {
+//                     std::cout << "Decoded " << frame_count << " frames, current PTS: " << frame->pts << std::endl;
+//                 }
+//             }
+//         }
+//         av_packet_unref(packet);
+//     }
+
+//     // Flush decoder
+//     avcodec_send_packet(decoder_ctx, nullptr);
+//     while (avcodec_receive_frame(decoder_ctx, frame) == 0) {
+//         AVFrame* cloned_frame = av_frame_clone(frame);
+//         if (cloned_frame) {
+//             FrameData frame_data;
+//             frame_data.frame = cloned_frame;
+//             // No packet received during flushing, so we set decode times to end of decoding
+//             frame_data.decode_start_time = std::chrono::steady_clock::now();
+//             frame_data.decode_end_time = frame_data.decode_start_time;
+//             // Push to each encoder's queue
+//             for (auto& q : encoder_queues) {
+//                 q->push(frame_data);
+//             }
+//         }
+//     }
+
+//     // Clean up decoder resources
+//     av_packet_free(&packet);
+//     av_frame_free(&frame);
+//     avcodec_free_context(&decoder_ctx);
+//     avformat_close_input(&input_fmt_ctx);
+//     decode_finished = true;
+
+//     // Notify all encoder queues that decoding is finished
+//     for (auto& q : encoder_queues) {
+//         q->set_finished();
+//     }
+
+//     std::cout << "Decoding finished." << std::endl;
+//     return true;
+// }
 
 // Encoder Function with Initialization and Scaling
 bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRational input_time_base, std::atomic<bool>& encode_finished) {
@@ -388,7 +559,7 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
     // Set SRT options with increased latency and specified packet size
     AVDictionary* format_opts = nullptr;
     av_dict_set(&format_opts, "latency", "0", 0);     // Latency in ms
-    av_dict_set(&format_opts, "buffer_size", "1000000", 0);
+    // av_dict_set(&format_opts, "buffer_size", "1000000", 0);
 
     // Allocate output format context with FLV over SRT
     if (avformat_alloc_output_context2(&output_fmt_ctx, nullptr, "flv", config.output_url.c_str()) < 0) {
@@ -634,6 +805,7 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
 
         if (frame_count % 100 == 0) {
             std::cout << "Encoded " << frame_count << " frames for " << config.output_url << ", queue length: " << frame_queue.size() << std::endl;
+            std::cout << "Decoded Time: " << decode_time << std::endl;
         }
 
         av_frame_free(&frame_data.frame);
@@ -696,16 +868,17 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
 int main(int argc, char* argv[]) {
     // Expecting at least 2 arguments: program, input_url, and at least 1 output_url
     // Maximum of 6 output URLs supported
-    if (argc < 3 || argc > 7) {
+    if (argc < 3 || argc > 8) {
         std::cerr << "Usage: " << argv[0] 
                   << " <input_srt_url> <output1_srt_url> [<output2_srt_url> ... <output6_srt_url>]" 
                   << std::endl;
         std::cerr << "Supported Resolutions (in order):" << std::endl;
-        std::cerr << "1. 2560x1440" << std::endl;
-        std::cerr << "2. 1920x1080" << std::endl;
-        std::cerr << "3. 1280x720" << std::endl;
-        std::cerr << "4. 854x480" << std::endl;
-        std::cerr << "5. 640x360" << std::endl;
+        std::cerr << "1. 2840x2160" << std::endl;
+        std::cerr << "2. 2560x1440" << std::endl;
+        std::cerr << "3. 1920x1080" << std::endl;
+        std::cerr << "4. 1280x720" << std::endl;
+        std::cerr << "5. 854x480" << std::endl;
+        std::cerr << "6. 640x360" << std::endl;
         return 1;
     }
 
@@ -720,12 +893,21 @@ int main(int argc, char* argv[]) {
         std::string log_filename;
     };
 
+    // std::vector<ResolutionBitrateLog> resolution_bitrate_log = {
+    //     {3840, 2160, 16000,  "frame-3840-"},
+    //     {2560, 1440, 10000,  "frame-2560-"},
+    //     {1920, 1080, 5000,  "frame-1920-"},
+    //     {1280, 720,  2500,  "frame-1280-"},
+    //     {854,  480,  1000,  "frame-854-"},
+    //     {640,  360,  600,   "frame-640-"}
+    // };
     std::vector<ResolutionBitrateLog> resolution_bitrate_log = {
-        {2560, 1440, 8000,  "frame-2560-"},
-        {1920, 1080, 5000,  "frame-1920-"},
-        {1280, 720,  2500,  "frame-1280-"},
-        {854,  480,  1000,  "frame-854-"},
-        {640,  360,  600,   "frame-640-"}
+        {3840, 2160, 16000,  "frame-3840-"},
+        {3840, 2160, 16000,  "frame-2560-"},
+        {3840, 2160, 16000,  "frame-1920-"},
+        {3840, 2160, 16000,  "frame-1280-"},
+        {3840, 2160, 16000,  "frame-854-"},
+        {3840, 2160, 16000,  "frame-640-"}
     };
 
     if (num_outputs > (int) resolution_bitrate_log.size()) {
