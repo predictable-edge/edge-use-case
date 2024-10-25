@@ -275,6 +275,7 @@ bool initialize_decoder(const char* input_url, DecoderInfo& decoder_info) {
     }
     // ctx information must be setting before open2...
     decoder_info.decoder_ctx->thread_count = 0;
+    decoder_info.decoder_ctx->thread_type = FF_THREAD_SLICE;
     // Open decoder
     if (avcodec_open2(decoder_info.decoder_ctx, decoder, nullptr) < 0) {
         std::cerr << "Could not open decoder" << std::endl;
@@ -411,138 +412,18 @@ void decoding_thread(AVCodecContext* decoder_ctx, PacketQueue& packet_queue, con
     av_frame_free(&frame);
 }
 
-// bool decode_frames(DecoderInfo decoder_info, std::vector<FrameQueue*>& encoder_queues, std::atomic<bool>& decode_finished) {
-//     PacketQueue packet_queue;
-//     std::atomic<bool> encoding_finished(false);
-//     std::vector<std::thread> encoder_threads;
-
-//     std::thread reader(packet_reading_thread, decoder_info.input_fmt_ctx, decoder_info.video_stream_idx, std::ref(packet_queue));
-//     std::thread decoder(decoding_thread, decoder_info.decoder_ctx, std::ref(packet_queue), std::ref(encoder_queues));
-
-//     reader.join();
-//     decoder.join();
-
-//     decode_finished = true;
-//     std::cout << "Decoding finished." << std::endl;
-//     return true;
-// }
-
 bool decode_frames(DecoderInfo decoder_info, std::vector<FrameQueue*>& encoder_queues, std::atomic<bool>& decode_finished) {
-    AVFormatContext* input_fmt_ctx = decoder_info.input_fmt_ctx;
-    AVCodecContext* decoder_ctx = decoder_info.decoder_ctx;
-    int video_stream_idx = decoder_info.video_stream_idx;
+    PacketQueue packet_queue;
+    std::atomic<bool> encoding_finished(false);
+    std::vector<std::thread> encoder_threads;
 
-    AVPacket* packet = av_packet_alloc();
-    AVFrame* frame = av_frame_alloc();
-    if (!packet || !frame) {
-        std::cerr << "Could not allocate packet or frame in decoder" << std::endl;
-        if (packet) av_packet_free(&packet);
-        if (frame) av_frame_free(&frame);
-        avcodec_free_context(&decoder_ctx);
-        avformat_close_input(&input_fmt_ctx);
-        return false;
-    }
+    std::thread reader(packet_reading_thread, decoder_info.input_fmt_ctx, decoder_info.video_stream_idx, std::ref(packet_queue));
+    std::thread decoder(decoding_thread, decoder_info.decoder_ctx, std::ref(packet_queue), std::ref(encoder_queues));
 
-    int64_t first_pts = AV_NOPTS_VALUE;
-    int frame_count = 0;
-    int64_t last_packet_pts = AV_NOPTS_VALUE; 
-    std::chrono::steady_clock::time_point decode_start;
-    decoder_ctx->flags |= AV_CODEC_FLAG_LOW_DELAY;
-    decoder_ctx->max_b_frames = 0;
+    reader.join();
+    decoder.join();
 
-    while (av_read_frame(input_fmt_ctx, packet) >= 0) {
-        if (packet->stream_index == video_stream_idx) {
-            bool is_new_frame = false;
-            if (packet->pts != AV_NOPTS_VALUE) {
-                if (packet->pts != last_packet_pts) {
-                    is_new_frame = true;
-                    last_packet_pts = packet->pts;
-                }
-            }
-            else if (packet->flags & AV_PKT_FLAG_KEY) {
-                is_new_frame = true;
-            }
-            if (is_new_frame) {
-                decode_start = std::chrono::steady_clock::now();
-            }
-            int ret = avcodec_send_packet(decoder_ctx, packet);
-            if (ret < 0) {
-                std::cerr << "Error sending packet to decoder: " << get_error_text(ret) << std::endl;
-                av_packet_unref(packet);
-                break;
-            }
-
-            while (ret >= 0) {
-                ret = avcodec_receive_frame(decoder_ctx, frame);
-                if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
-                    break;
-                }
-                else if (ret < 0) {
-                    std::cerr << "Error during decoding: " << get_error_text(ret) << std::endl;
-                    break;
-                }
-
-                auto decode_end = std::chrono::steady_clock::now();
-
-                if (first_pts == AV_NOPTS_VALUE) {
-                    first_pts = frame->pts;
-                    std::cout << "First frame PTS: " << first_pts << std::endl;
-                }
-
-                for (auto& q : encoder_queues) {
-                    AVFrame* cloned_frame = av_frame_clone(frame);
-                    if (!cloned_frame) {
-                        std::cerr << "Could not clone frame" << std::endl;
-                        continue;
-                    }
-
-                    cloned_frame->pts -= first_pts;
-
-                    FrameData frame_data;
-                    frame_data.frame = cloned_frame;
-                    frame_data.decode_start_time = decode_start;
-                    frame_data.decode_end_time = decode_end;
-                    q->push(frame_data);
-                }
-
-                frame_count++;
-                if (frame_count % 100 == 0) {
-                    std::cout << "Decoded " << frame_count << " frames, current PTS: " << frame->pts << std::endl;
-                }
-            }
-        }
-        av_packet_unref(packet);
-    }
-
-    // Flush decoder
-    avcodec_send_packet(decoder_ctx, nullptr);
-    while (avcodec_receive_frame(decoder_ctx, frame) == 0) {
-        AVFrame* cloned_frame = av_frame_clone(frame);
-        if (cloned_frame) {
-            FrameData frame_data;
-            frame_data.frame = cloned_frame;
-            // No packet received during flushing, so we set decode times to end of decoding
-            frame_data.decode_start_time = std::chrono::steady_clock::now();
-            frame_data.decode_end_time = frame_data.decode_start_time;
-            // Push to each encoder's queue
-            for (auto& q : encoder_queues) {
-                q->push(frame_data);
-            }
-        }
-    }
-
-    // Clean up decoder resources
-    av_packet_free(&packet);
-    av_frame_free(&frame);
-    avcodec_free_context(&decoder_ctx);
-    avformat_close_input(&input_fmt_ctx);
     decode_finished = true;
-
-    // Notify all encoder queues that decoding is finished
-    for (auto& q : encoder_queues) {
-        q->set_finished();
-    }
-
     std::cout << "Decoding finished." << std::endl;
     return true;
 }
