@@ -274,8 +274,9 @@ bool initialize_decoder(const char* input_url, DecoderInfo& decoder_info) {
         return false;
     }
     // ctx information must be setting before open2...
-    decoder_info.decoder_ctx->thread_count = 0;
-    decoder_info.decoder_ctx->thread_type = FF_THREAD_SLICE;
+    decoder_info.decoder_ctx->thread_count = 4;
+    // decoder_info.decoder_ctx->thread_type = FF_THREAD_SLICE;
+    decoder_info.decoder_ctx->flags2 |= AV_CODEC_FLAG2_FAST;
     // Open decoder
     if (avcodec_open2(decoder_info.decoder_ctx, decoder, nullptr) < 0) {
         std::cerr << "Could not open decoder" << std::endl;
@@ -771,7 +772,7 @@ int main(int argc, char* argv[]) {
     };
 
     std::vector<ResolutionBitrateLog> resolution_bitrate_log = {
-        {3840, 2160, 16000,  "frame-3840-"},
+        {2560, 1440, 16000,  "frame-3840-"},
         {2560, 1440, 10000,  "frame-2560-"},
         {1920, 1080, 5000,  "frame-1920-"},
         {1280, 720,  2500,  "frame-1280-"},
@@ -779,9 +780,9 @@ int main(int argc, char* argv[]) {
         {640,  360,  600,   "frame-640-"}
     };
     // std::vector<ResolutionBitrateLog> resolution_bitrate_log = {
-    //     {3840, 2160, 16000,  "frame-3840-"},
-    //     {3840, 2160, 16000,  "frame-2560-"},
-    //     {3840, 2160, 16000,  "frame-1920-"},
+    //     {2560, 1440, 10000,  "frame-3840-"},
+    //     {2560, 1440, 10000,  "frame-2560-"},
+    //     {640, 360, 16000,  "frame-1920-"},
     //     {3840, 2160, 16000,  "frame-1280-"},
     //     {3840, 2160, 16000,  "frame-854-"},
     //     {3840, 2160, 16000,  "frame-640-"}
