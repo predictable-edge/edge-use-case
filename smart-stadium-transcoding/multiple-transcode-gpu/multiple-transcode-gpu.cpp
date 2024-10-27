@@ -330,8 +330,17 @@ bool initialize_decoder(const char* input_url, DecoderInfo& decoder_info) {
         }
     }
 
+    AVDictionary* decoder_opts = nullptr;
+    // these settings do not work
+    av_dict_set(&decoder_opts, "delay", "0", 0);
+    av_dict_set(&decoder_opts, "max_delay", "0", 0);
+    av_dict_set(&decoder_opts, "reorder", "0", 0);
+
+    // Enable low delay flag, important when reducing decoding buffer latency
+    decoder_info.decoder_ctx->flags |= AV_CODEC_FLAG_LOW_DELAY;
+
     // Open decoder
-    if (avcodec_open2(decoder_info.decoder_ctx, decoder, nullptr) < 0) {
+    if (avcodec_open2(decoder_info.decoder_ctx, decoder, &decoder_opts) < 0) {
         std::cerr << "Could not open decoder" << std::endl;
         avcodec_free_context(&decoder_info.decoder_ctx);
         avformat_close_input(&decoder_info.input_fmt_ctx);
@@ -595,6 +604,9 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
     av_dict_set(&codec_opts, "preset", "p1", 0); // p7 is equivalent to "slow" preset
     av_dict_set(&codec_opts, "tune", "ull", 0);  // Ultra low latency
     av_dict_set_int(&codec_opts, "async_depth", 1, 0);
+
+    // valid when reducing latency
+    av_dict_set(&codec_opts, "delay", "0", 0);
 
     // Open encoder with codec options
     if (avcodec_open2(encoder_ctx, encoder, &codec_opts) < 0) {
