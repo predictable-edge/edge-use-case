@@ -588,6 +588,7 @@ void* pull_stream(void* args) {
         avformat_network_deinit();
         return nullptr;
     }
+    codec_ctx->thread_count = 8;
 
     ret = avcodec_open2(codec_ctx, codec, nullptr);
     if (ret < 0) {

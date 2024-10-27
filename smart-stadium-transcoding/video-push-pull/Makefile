@@ -31,7 +31,7 @@ $(TARGET): $(OBJS)
 
 # Clean up build artifacts
 clean:
-	rm -f $(OBJS) $(TARGET) $(RESULT)
+	rm -f $(OBJS) $(TARGET)
 
 clog:
 	rm -f $(RESULT)
