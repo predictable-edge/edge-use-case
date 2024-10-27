@@ -274,9 +274,12 @@ bool initialize_decoder(const char* input_url, DecoderInfo& decoder_info) {
         return false;
     }
     // ctx information must be setting before open2...
-    decoder_info.decoder_ctx->thread_count = 4;
-    // decoder_info.decoder_ctx->thread_type = FF_THREAD_SLICE;
+    decoder_info.decoder_ctx->thread_count = 0;
+    decoder_info.decoder_ctx->thread_type = FF_THREAD_SLICE;
     decoder_info.decoder_ctx->flags2 |= AV_CODEC_FLAG2_FAST;
+
+    // decoder_info.decoder_ctx->thread_count = 4;
+    // decoder_info.decoder_ctx->flags2 |= AV_CODEC_FLAG2_FAST;
     // Open decoder
     if (avcodec_open2(decoder_info.decoder_ctx, decoder, nullptr) < 0) {
         std::cerr << "Could not open decoder" << std::endl;
@@ -683,8 +686,8 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
 
         if (frame_count % 100 == 0) {
             std::cout << "Encoded " << frame_count << " frames for " << config.output_url << ", queue length: " << frame_queue.size() << std::endl;
-            std::cout << "Decoded Time: " << decode_time << std::endl;
         }
+        // std::cout << "Decoded Time: " << decode_time << std::endl;
 
         av_frame_free(&frame_data.frame);
     }

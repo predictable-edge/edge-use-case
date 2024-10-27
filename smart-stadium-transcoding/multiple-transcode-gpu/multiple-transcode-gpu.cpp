@@ -419,6 +419,7 @@ void decoding_thread(AVCodecContext* decoder_ctx, PacketQueue& packet_queue, con
                 std::cerr << "Error receiving frame from decoder: " << get_error_text(ret) << std::endl;
                 break;
             }
+            // std::cout << frame->pts << ": " << get_timestamp_with_ms() << std::endl;
 
             auto decode_end = std::chrono::steady_clock::now();
             // int64_t decode_e = get_current_time_us();
@@ -593,6 +594,7 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
     AVDictionary* codec_opts = nullptr;
     av_dict_set(&codec_opts, "preset", "p1", 0); // p7 is equivalent to "slow" preset
     av_dict_set(&codec_opts, "tune", "ull", 0);  // Ultra low latency
+    av_dict_set_int(&codec_opts, "async_depth", 1, 0);
 
     // Open encoder with codec options
     if (avcodec_open2(encoder_ctx, encoder, &codec_opts) < 0) {
