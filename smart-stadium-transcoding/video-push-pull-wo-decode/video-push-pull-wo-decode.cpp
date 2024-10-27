@@ -670,7 +670,6 @@ void* pull_stream(void* args) {
             //     frame_count++;
             // }
             int64_t pull_time_ms = get_current_time_us() / 1000;
-            frame_count++;
 
             // Add entry to TimingLogger
             logger.add_entry(
@@ -680,6 +679,7 @@ void* pull_stream(void* args) {
                 push_timestamps_after_enc[frame_count],
                 pull_time_ms_before_dec
             );
+            frame_count++;
         }
 
         av_packet_unref(packet);
