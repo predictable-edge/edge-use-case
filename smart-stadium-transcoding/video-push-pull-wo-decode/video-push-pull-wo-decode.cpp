@@ -507,7 +507,9 @@ void* pull_stream(void* args) {
     av_dict_set(&options, "flags", "low_delay", 0);
     av_dict_set(&options, "latency", "0", 0);     // Latency in ms
     av_dict_set(&options, "buffer_size", "1000000", 0);
-    // av_dict_set(&options, "maxbw", "100000000", 0);
+    av_dict_set(&options, "flush_packets", "1", 0);
+    av_dict_set(&options, "rcvlatency", "0", 0);
+    av_dict_set(&options, "peerlatency", "0", 0);
 
     ret = avformat_open_input(&input_fmt_ctx, input_url, nullptr, &options);
     if (ret < 0) {
@@ -589,6 +591,7 @@ void* pull_stream(void* args) {
         return nullptr;
     }
     // codec_ctx->thread_count = 1;
+    codec_ctx->flags |= AV_CODEC_FLAG_LOW_DELAY;
 
     ret = avcodec_open2(codec_ctx, codec, nullptr);
     if (ret < 0) {
@@ -631,6 +634,7 @@ void* pull_stream(void* args) {
     while (av_read_frame(input_fmt_ctx, packet) >= 0) {
         if (packet->stream_index == video_stream_index) {
             int64_t pull_time_ms_before_dec = get_current_time_us() / 1000;
+            std::cout << packet->pts << ": " << get_timestamp_with_ms() << std::endl;
 
             // ret = avcodec_send_packet(codec_ctx, packet);
             // if (ret < 0) {
@@ -685,10 +689,10 @@ void* pull_stream(void* args) {
         av_packet_unref(packet);
     }
 
-    avcodec_send_packet(codec_ctx, NULL);
-    while (avcodec_receive_frame(codec_ctx, frame) == 0) {
-        frame_count++;
-    }
+    // avcodec_send_packet(codec_ctx, NULL);
+    // while (avcodec_receive_frame(codec_ctx, frame) == 0) {
+    //     frame_count++;
+    // }
 
     // Write the log to file
     logger.write_to_file();
@@ -820,6 +824,7 @@ void* push_stream_directly(void* args) {
             int64_t push_time_ms = get_current_time_us() / 1000;
             push_timestamps[frame_count] = push_time_ms;
             push_timestamps_after_enc[frame_count] = push_time_ms;
+            // std::cout << packet->pts << ": " << get_timestamp_with_ms() << std::endl;
             ret = av_interleaved_write_frame(output_fmt_ctx, packet);
             if (ret < 0) {
                 pthread_mutex_lock(&cout_mutex);
