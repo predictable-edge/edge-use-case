@@ -13,6 +13,7 @@
 #include <ctime>
 #include <assert.h>
 #include <vector>
+#include <filesystem>
 
 // FFmpeg includes
 extern "C" {
@@ -156,6 +157,17 @@ public:
 
     void write_to_file() {
         std::lock_guard<std::mutex> lock(mutex_);
+        std::filesystem::path filepath(filename_);
+        std::filesystem::path parent_path = filepath.parent_path();
+        try {
+            if (!parent_path.empty() && !std::filesystem::exists(parent_path)) {
+                std::filesystem::create_directories(parent_path);
+                std::cout << "Created directories: " << parent_path << std::endl;
+            }
+        } catch (const std::filesystem::filesystem_error& e) {
+            std::cerr << "Filesystem error: " << e.what() << std::endl;
+            return;
+        }
         std::ofstream ofs(filename_);
         if (!ofs.is_open()) {
             std::cerr << "Failed to open " << filename_ << " for writing." << std::endl;
@@ -1022,7 +1034,7 @@ int main(int argc, char* argv[]) {
         {3840, 2160, 16000,   "frame-854-"},
         {3840, 2160, 16000,    "frame-640-"},
         {3840, 2160, 16000,    "frame-320-"},
-        {2560, 1440, 10000,    "frame-160-"},
+        {3840, 2160, 16000,    "frame-160-"},
     };
 
     if (num_outputs > (int) resolution_bitrate_log.size()) {
@@ -1058,7 +1070,7 @@ int main(int argc, char* argv[]) {
         config.width = resolution_bitrate_log[i].width;
         config.height = resolution_bitrate_log[i].height;
         config.bitrate = resolution_bitrate_log[i].bitrate_kbps;
-        config.log_filename = resolution_bitrate_log[i].log_filename + get_timestamp_with_ms() + ".log";
+        config.log_filename = "/home/zx/edge-use-case/smart-stadium-transcoding/result/multiple-transcode-gpu/" + resolution_bitrate_log[i].log_filename + get_timestamp_with_ms() + ".log";
         config.framerate = decoder_info.input_framerate;
         encoder_configs.push_back(config);
     }
