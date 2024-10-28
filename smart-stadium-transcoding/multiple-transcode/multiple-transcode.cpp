@@ -277,6 +277,7 @@ bool initialize_decoder(const char* input_url, DecoderInfo& decoder_info) {
     decoder_info.decoder_ctx->thread_count = 0;
     decoder_info.decoder_ctx->thread_type = FF_THREAD_SLICE;
     decoder_info.decoder_ctx->flags2 |= AV_CODEC_FLAG2_FAST;
+    decoder_info.decoder_ctx->flags |= AV_CODEC_FLAG_LOW_DELAY;
 
     // decoder_info.decoder_ctx->thread_count = 4;
     // decoder_info.decoder_ctx->flags2 |= AV_CODEC_FLAG2_FAST;
@@ -492,6 +493,7 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
     AVDictionary* codec_opts = nullptr;
     av_dict_set(&codec_opts, "preset", "ultrafast", 0);
     av_dict_set(&codec_opts, "tune", "zerolatency", 0);
+    av_dict_set(&codec_opts, "delay", "0", 0);
 
     // Open encoder with codec options
     if (avcodec_open2(encoder_ctx, encoder, &codec_opts) < 0) {

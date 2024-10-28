@@ -336,7 +336,7 @@ bool initialize_decoder(const char* input_url, DecoderInfo& decoder_info) {
     av_dict_set(&decoder_opts, "max_delay", "0", 0);
     av_dict_set(&decoder_opts, "reorder", "0", 0);
 
-    // Enable low delay flag, important when reducing decoding buffer latency
+    // valid when enable low delay flag, important when reducing decoding buffer latency
     decoder_info.decoder_ctx->flags |= AV_CODEC_FLAG_LOW_DELAY;
 
     // Open decoder
@@ -607,6 +607,8 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
 
     // valid when reducing latency
     av_dict_set(&codec_opts, "delay", "0", 0);
+    // invalid
+    av_dict_set_int(&codec_opts, "rc-lookahead", 0, 0);
 
     // Open encoder with codec options
     if (avcodec_open2(encoder_ctx, encoder, &codec_opts) < 0) {
@@ -890,6 +892,7 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
                 // Rescale packet timestamp
                 av_packet_rescale_ts(enc_pkt, encoder_ctx->time_base, out_stream->time_base);
                 enc_pkt->stream_index = out_stream->index;
+                // std::cout << filt_frame->pts << ": " << get_timestamp_with_ms() << std::endl;
 
                 // Write packet to output
                 int write_ret = av_interleaved_write_frame(output_fmt_ctx, enc_pkt);
