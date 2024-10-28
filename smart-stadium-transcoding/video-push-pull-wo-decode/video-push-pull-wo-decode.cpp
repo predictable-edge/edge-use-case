@@ -17,6 +17,7 @@
 #include <queue>
 #include <mutex>
 #include <vector>
+#include <filesystem>
 
 // Include FFmpeg headers
 extern "C" {
@@ -78,6 +79,17 @@ public:
 
     void write_to_file() {
         std::lock_guard<std::mutex> lock(mutex_);
+        std::filesystem::path filepath(filename_);
+        std::filesystem::path parent_path = filepath.parent_path();
+        try {
+            if (!parent_path.empty() && !std::filesystem::exists(parent_path)) {
+                std::filesystem::create_directories(parent_path);
+                std::cout << "Created directories: " << parent_path << std::endl;
+            }
+        } catch (const std::filesystem::filesystem_error& e) {
+            std::cerr << "Filesystem error: " << e.what() << std::endl;
+            return;
+        }
         std::ofstream ofs(filename_);
         if (!ofs.is_open()) {
             std::cerr << "Failed to open " << filename_ << " for writing." << std::endl;
@@ -92,8 +104,8 @@ public:
         for (const auto& entry : log_entries) {
             int64_t e2e_latency = (entry.pull_time_ms != -1 && entry.push_time_ms != -1) ? 
                                    (entry.pull_time_ms - entry.push_time_ms) : -1;
-            int64_t trans_latency = (entry.pull_before_dec_ms != -1 && entry.push_after_enc_ms != -1) ? 
-                                     (entry.pull_before_dec_ms - entry.push_after_enc_ms) : -1;
+            // int64_t trans_latency = (entry.pull_before_dec_ms != -1 && entry.push_after_enc_ms != -1) ? 
+            //                          (entry.pull_before_dec_ms - entry.push_after_enc_ms) : -1;
 
             ofs << std::left << std::setw(10) << entry.frame_number
                 << std::left << std::setw(20) << (e2e_latency != -1 ? std::to_string(e2e_latency) + " ms" : "N/A")
@@ -490,7 +502,7 @@ void* pull_stream(void* args) {
 
     // Create a TimingLogger instance for this pull thread
     std::stringstream ss;
-    ss << "frame-" << index << "-" << get_timestamp_with_ms() << ".log";
+    ss << "/home/zx/edge-use-case/smart-stadium-transcoding/result/video-push-pull-wo-decode/frame-" << index << "-" << get_timestamp_with_ms() << ".log";
     std::string log_filename = ss.str();
     TimingLogger logger(log_filename);
 
