@@ -369,6 +369,7 @@ void decoding_thread(AVCodecContext* decoder_ctx, PacketQueue& packet_queue, con
                 std::cerr << "Error receiving frame from decoder: " << get_error_text(ret) << std::endl;
                 break;
             }
+            // std::cout << frame->pts << ": " << get_timestamp_with_ms() << std::endl;
 
             auto decode_end = std::chrono::steady_clock::now();
 
@@ -777,7 +778,7 @@ int main(int argc, char* argv[]) {
     };
 
     std::vector<ResolutionBitrateLog> resolution_bitrate_log = {
-        {2560, 1440, 16000,  "frame-3840-"},
+        {3840, 2160, 16000,  "frame-3840-"},
         {2560, 1440, 10000,  "frame-2560-"},
         {1920, 1080, 5000,  "frame-1920-"},
         {1280, 720,  2500,  "frame-1280-"},
