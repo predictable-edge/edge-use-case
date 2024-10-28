@@ -86,7 +86,7 @@ public:
 
         ofs << std::left << std::setw(10) << "Frame" 
             << std::left << std::setw(20) << "E2E latency(ms)" 
-            << std::left << std::setw(25) << "Trans latency(ms)" 
+            // << std::left << std::setw(25) << "Trans latency(ms)" 
             << "\n";
 
         for (const auto& entry : log_entries) {
@@ -97,7 +97,7 @@ public:
 
             ofs << std::left << std::setw(10) << entry.frame_number
                 << std::left << std::setw(20) << (e2e_latency != -1 ? std::to_string(e2e_latency) + " ms" : "N/A")
-                << std::left << std::setw(25) << (trans_latency != -1 ? std::to_string(trans_latency) + " ms" : "N/A")
+                // << std::left << std::setw(25) << (trans_latency != -1 ? std::to_string(trans_latency) + " ms" : "N/A")
                 << "\n";
         }
 
@@ -507,9 +507,6 @@ void* pull_stream(void* args) {
     av_dict_set(&options, "flags", "low_delay", 0);
     av_dict_set(&options, "latency", "0", 0);     // Latency in ms
     av_dict_set(&options, "buffer_size", "1000000", 0);
-    av_dict_set(&options, "flush_packets", "1", 0);
-    av_dict_set(&options, "rcvlatency", "0", 0);
-    av_dict_set(&options, "peerlatency", "0", 0);
 
     ret = avformat_open_input(&input_fmt_ctx, input_url, nullptr, &options);
     if (ret < 0) {
@@ -592,6 +589,8 @@ void* pull_stream(void* args) {
     }
     // codec_ctx->thread_count = 1;
     codec_ctx->flags |= AV_CODEC_FLAG_LOW_DELAY;
+    // codec_ctx->thread_count = 0;
+    // codec_ctx->flags2 |= AV_CODEC_FLAG2_FAST;
 
     ret = avcodec_open2(codec_ctx, codec, nullptr);
     if (ret < 0) {
@@ -634,7 +633,7 @@ void* pull_stream(void* args) {
     while (av_read_frame(input_fmt_ctx, packet) >= 0) {
         if (packet->stream_index == video_stream_index) {
             int64_t pull_time_ms_before_dec = get_current_time_us() / 1000;
-            std::cout << packet->pts << ": " << get_timestamp_with_ms() << std::endl;
+            // std::cout << packet->pts << ": " << get_timestamp_with_ms() << std::endl;
 
             // ret = avcodec_send_packet(codec_ctx, packet);
             // if (ret < 0) {
