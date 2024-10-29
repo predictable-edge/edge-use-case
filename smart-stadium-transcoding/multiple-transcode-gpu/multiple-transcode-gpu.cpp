@@ -1018,23 +1018,23 @@ int main(int argc, char* argv[]) {
     };
 
     // std::vector<ResolutionBitrateLog> resolution_bitrate_log = {
-    //     {3840, 2160, 16000,  "frame-3840-"},
-    //     {2560, 1440, 10000,  "frame-2560-"},
-    //     {1920, 1080, 5000,   "frame-1920-"},
-    //     {1280, 720,  2500,   "frame-1280-"},
-    //     {854,  480,  1000,   "frame-854-"},
-    //     {640,  360,  600,    "frame-640-"}
+    //     {3840, 2160, 16000,  "frame-1"},
+    //     {2560, 1440, 10000,  "frame-2"},
+    //     {1920, 1080, 5000,   "frame-3"},
+    //     {1280, 720,  2500,   "frame-4"},
+    //     {854,  480,  1000,   "frame-5"},
+    //     {640,  360,  600,    "frame-6"}
     // };
 
     std::vector<ResolutionBitrateLog> resolution_bitrate_log = {
-        {3840, 2160, 16000,  "frame-3840-"},
-        {3840, 2160, 16000,  "frame-2560-"},
-        {3840, 2160, 16000,   "frame-1920-"},
-        {3840, 2160, 16000,   "frame-1280-"},
-        {3840, 2160, 16000,   "frame-854-"},
-        {3840, 2160, 16000,    "frame-640-"},
-        {3840, 2160, 16000,    "frame-320-"},
-        {3840, 2160, 16000,    "frame-160-"},
+        {3840, 2160, 16000,  "frame-1"},
+        {3840, 2160, 16000,  "frame-2"},
+        {3840, 2160, 16000,   "frame-3"},
+        {3840, 2160, 16000,   "frame-4"},
+        {3840, 2160, 16000,   "frame-5"},
+        {3840, 2160, 16000,    "frame-6"},
+        {3840, 2160, 16000,    "frame-7"},
+        {3840, 2160, 16000,    "frame-8"},
     };
 
     if (num_outputs > (int) resolution_bitrate_log.size()) {
@@ -1070,7 +1070,8 @@ int main(int argc, char* argv[]) {
         config.width = resolution_bitrate_log[i].width;
         config.height = resolution_bitrate_log[i].height;
         config.bitrate = resolution_bitrate_log[i].bitrate_kbps;
-        config.log_filename = "/home/zx/edge-use-case/smart-stadium-transcoding/result/multiple-transcode-gpu/" + resolution_bitrate_log[i].log_filename + get_timestamp_with_ms() + ".log";
+        config.log_filename = "/home/zx/edge-use-case/smart-stadium-transcoding/result/multiple-transcode-gpu/task" + std::to_string(num_outputs) + "/" + get_timestamp_with_ms() + "/"
+                              + resolution_bitrate_log[i].log_filename + ".log";
         config.framerate = decoder_info.input_framerate;
         encoder_configs.push_back(config);
     }

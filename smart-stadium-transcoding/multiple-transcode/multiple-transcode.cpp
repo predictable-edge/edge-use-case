@@ -764,7 +764,7 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
 int main(int argc, char* argv[]) {
     // Expecting at least 2 arguments: program, input_url, and at least 1 output_url
     // Maximum of 6 output URLs supported
-    if (argc < 3 || argc > 8) {
+    if (argc < 3) {
         std::cerr << "Usage: " << argv[0] 
                   << " <input_srt_url> <output1_srt_url> [<output2_srt_url> ... <output6_srt_url>]" 
                   << std::endl;
@@ -789,22 +789,22 @@ int main(int argc, char* argv[]) {
         std::string log_filename;
     };
 
-    std::vector<ResolutionBitrateLog> resolution_bitrate_log = {
-        {3840, 2160, 16000,  "frame-3840-"},
-        {2560, 1440, 10000,  "frame-2560-"},
-        {1920, 1080, 5000,  "frame-1920-"},
-        {1280, 720,  2500,  "frame-1280-"},
-        {854,  480,  1000,  "frame-854-"},
-        {640,  360,  600,   "frame-640-"}
-    };
     // std::vector<ResolutionBitrateLog> resolution_bitrate_log = {
-    //     {2560, 1440, 10000,  "frame-3840-"},
-    //     {2560, 1440, 10000,  "frame-2560-"},
-    //     {640, 360, 16000,  "frame-1920-"},
-    //     {3840, 2160, 16000,  "frame-1280-"},
-    //     {3840, 2160, 16000,  "frame-854-"},
-    //     {3840, 2160, 16000,  "frame-640-"}
+    //     {3840, 2160, 16000,  "frame-1"},
+    //     {2560, 1440, 10000,  "frame-2"},
+    //     {1920, 1080, 5000,  "frame-3"},
+    //     {1280, 720,  2500,  "frame-4"},
+    //     {854,  480,  1000,  "frame-5"},
+    //     {640,  360,  600,   "frame-6"}
     // };
+    std::vector<ResolutionBitrateLog> resolution_bitrate_log = {
+        {2560, 1440, 10000,  "frame-1"},
+        {2560, 1440, 10000,  "frame-2"},
+        {2560, 1440, 10000,  "frame-3"},
+        {2560, 1440, 10000,  "frame-4"},
+        {2560, 1440, 10000,  "frame-5"},
+        {2560, 1440, 10000,  "frame-6"}
+    };
 
     if (num_outputs > (int) resolution_bitrate_log.size()) {
         std::cerr << "Error: Maximum supported output URLs is " << resolution_bitrate_log.size() << "." << std::endl;
@@ -833,7 +833,8 @@ int main(int argc, char* argv[]) {
         config.width = resolution_bitrate_log[i].width;
         config.height = resolution_bitrate_log[i].height;
         config.bitrate = resolution_bitrate_log[i].bitrate_kbps;
-        config.log_filename =  "/home/zx/edge-use-case/smart-stadium-transcoding/result/multiple-transcode/" + resolution_bitrate_log[i].log_filename + get_timestamp_with_ms() + ".log";
+        config.log_filename = "/home/zx/edge-use-case/smart-stadium-transcoding/result/multiple-transcode/task" + std::to_string(num_outputs) + "/" + get_timestamp_with_ms() + "/"
+                              + resolution_bitrate_log[i].log_filename + ".log";
         config.framerate = decoder_info.input_framerate;
         encoder_configs.push_back(config);
     }
