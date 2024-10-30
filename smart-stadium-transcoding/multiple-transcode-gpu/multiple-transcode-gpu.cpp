@@ -1026,15 +1026,24 @@ int main(int argc, char* argv[]) {
     //     {640,  360,  600,    "frame-6"}
     // };
 
+    // std::vector<ResolutionBitrateLog> resolution_bitrate_log = {
+    //     {3840, 2160, 16000,  "frame-1"},
+    //     {3840, 2160, 16000,  "frame-2"},
+    //     {3840, 2160, 16000,   "frame-3"},
+    //     {3840, 2160, 16000,   "frame-4"},
+    //     {3840, 2160, 16000,   "frame-5"},
+    //     {3840, 2160, 16000,    "frame-6"},
+    //     {3840, 2160, 16000,    "frame-7"},
+    //     {3840, 2160, 16000,    "frame-8"},
+    // };
+
     std::vector<ResolutionBitrateLog> resolution_bitrate_log = {
-        {3840, 2160, 16000,  "frame-1"},
-        {3840, 2160, 16000,  "frame-2"},
-        {3840, 2160, 16000,   "frame-3"},
-        {3840, 2160, 16000,   "frame-4"},
-        {3840, 2160, 16000,   "frame-5"},
-        {3840, 2160, 16000,    "frame-6"},
-        {3840, 2160, 16000,    "frame-7"},
-        {3840, 2160, 16000,    "frame-8"},
+        {2560, 1440, 4000,  "frame-1"},
+        {2560, 1440, 4000,  "frame-2"},
+        {2560, 1440, 4000,  "frame-3"},
+        {2560, 1440, 4000,  "frame-4"},
+        {2560, 1440, 4000,  "frame-5"},
+        {2560, 1440, 4000,  "frame-6"}
     };
 
     if (num_outputs > (int) resolution_bitrate_log.size()) {

@@ -231,7 +231,8 @@ bool initialize_decoder(const char* input_url, DecoderInfo& decoder_info) {
     decoder_info.input_fmt_ctx = nullptr;
     AVDictionary* format_opts = nullptr;
     av_dict_set(&format_opts, "latency", "0", 0);         // Latency in ms 
-    av_dict_set(&format_opts, "buffer_size", "1000000", 0);
+    av_dict_set(&format_opts, "buffer_size", "100000000", 0);
+    av_dict_set(&format_opts, "reorder_queue_size", "10000", 0);
     if (avformat_open_input(&decoder_info.input_fmt_ctx, input_url, nullptr, &format_opts) < 0) {
         std::cerr << "Could not open input SRT stream: " << input_url << std::endl;
         av_dict_free(&format_opts);
@@ -798,12 +799,12 @@ int main(int argc, char* argv[]) {
     //     {640,  360,  600,   "frame-6"}
     // };
     std::vector<ResolutionBitrateLog> resolution_bitrate_log = {
-        {2560, 1440, 10000,  "frame-1"},
-        {2560, 1440, 10000,  "frame-2"},
-        {2560, 1440, 10000,  "frame-3"},
-        {2560, 1440, 10000,  "frame-4"},
-        {2560, 1440, 10000,  "frame-5"},
-        {2560, 1440, 10000,  "frame-6"}
+        {2560, 1440, 4000,  "frame-1"},
+        {2560, 1440, 4000,  "frame-2"},
+        {2560, 1440, 4000,  "frame-3"},
+        {2560, 1440, 4000,  "frame-4"},
+        {2560, 1440, 4000,  "frame-5"},
+        {2560, 1440, 4000,  "frame-6"}
     };
 
     if (num_outputs > (int) resolution_bitrate_log.size()) {
