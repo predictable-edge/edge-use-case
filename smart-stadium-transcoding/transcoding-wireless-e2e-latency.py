@@ -39,19 +39,21 @@ def process_all_folders(root_folder, name_mapping=None, skip_rows=650):
     # Define default mapping if none provided
     if name_mapping is None:
         name_mapping = {
-            'E2E_wo_WC': 'E2E w/o WC',
-            'E2E': 'E2E',
-            'E2E_w_Contention': 'E2E w Contention'
+            'E2E_wo_WC': 'E2E w/o Wireless Communication',
+            'E2E': 'E2E w Wireless Communication',
+            'E2E_w_Contention': 'E2E w Wireless Contention',
+            'E2E_w_all_Contention': 'E2E w both Wireless\nand Computing Contentions'
         }
     
     # Define order for display
-    display_order = ['E2E w/o WC', 'E2E', 'E2E w Contention']
+    display_order = list(name_mapping.values())
     
     grouped_data = defaultdict(list)
     
     print(f"Scanning directory: {root_folder}")
     for folder in sorted(os.listdir(root_folder)):
         folder_path = os.path.join(root_folder, folder)
+        print(folder_path)
         if os.path.isdir(folder_path):
             display_name = name_mapping.get(folder, folder)
             
@@ -77,71 +79,86 @@ def process_all_folders(root_folder, name_mapping=None, skip_rows=650):
 
 def create_boxplot(data_dict, output_file='latency_boxplot.pdf'):
     """
-    Create an enhanced boxplot visualization with thicker lines and better proportions
+    Create an enhanced boxplot visualization with legend inside the plot
     """
     # Set the style for better visualization
     plt.style.use('seaborn-v0_8-whitegrid')
     
     # Create figure with adjusted size
-    plt.figure(figsize=(13, 8))  # 调整比例以使图形更紧凑
+    plt.figure(figsize=(13, 8))
     
     # Create DataFrame for plotting
     df_plot = pd.DataFrame(data_dict)
     
-    # Custom color palette
-    colors = ["#2ecc71", "#3498db", "#e74c3c"]
+    # Custom color palette - added fourth color
+    colors = ["#2ecc71", "#3498db", "#e74c3c", "#9b59b6"]
     
     # Create boxplot with enhanced styling
     box_plot = sns.boxplot(data=df_plot,
-                          width=0.5,  # 减小宽度使箱形更紧凑
+                          width=0.5,
                           palette=colors,
-                          linewidth=6,  # 增加基本线条粗细
+                          linewidth=6,
                           whis=[0, 100],
                           medianprops={"color": "black", 
-                                     "linewidth": 3},  # 增加中位数线的粗细
+                                     "linewidth": 3},
                           boxprops={"alpha": 0.8,
-                                  "linewidth": 4},  # 增加箱体线条粗细
-                          whiskerprops={"linewidth": 4},  # 增加须线粗细
-                          capprops={"linewidth": 4},  # 增加须端线条粗细
-                          flierprops={"markersize": 8})  # 如果有离群点，增加其大小
+                                  "linewidth": 5},
+                          whiskerprops={"linewidth": 5},
+                          capprops={"linewidth": 5},
+                          flierprops={"markersize": 8})
     
-    plt.xlabel('Network Scenario', 
-              fontsize=38, 
-              labelpad=15,
-              fontweight='bold')
+    # Remove x-axis completely
+    ax = plt.gca()
+    ax.xaxis.set_visible(False)  # This removes the x-axis completely
     
-    plt.ylabel('Latency (ms)', 
-              fontsize=38, 
-              labelpad=15,
-              fontweight='bold')
+    # Create custom legend
+    legend_handles = [plt.Rectangle((0,0),1,1, facecolor=color, alpha=0.8) 
+                     for color in colors[:len(data_dict)]]
+    plt.legend(legend_handles, 
+              data_dict.keys(),
+              fontsize=36,
+              loc='upper left',  # Changed to upper right inside the plot
+              bbox_to_anchor=(-0.02, 0.99))  # Adjusted to keep some padding from the edges
+    
+    plt.ylabel('Latency (ms)', fontsize=45, labelpad=5, fontweight='bold')
     
     # Format axis with thicker lines
-    ax = plt.gca()
     ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{int(x)}'))
-    ax.spines['left'].set_linewidth(2)    # 增加坐标轴线条粗细
-    ax.spines['bottom'].set_linewidth(2)
-    ax.tick_params(width=2)  # 增加刻度线粗细
+    ax.spines['left'].set_linewidth(3)
+    ax.spines['left'].set_color('black')
+    ax.spines['bottom'].set_linewidth(3)
+    ax.spines['bottom'].set_color('black')
+    ax.tick_params(width=2)
     
     # Enhance grid with thicker lines
     plt.grid(True, axis='y', linestyle='--', alpha=0.7, linewidth=1.5)
     
     # Format labels
-    plt.xticks(fontsize=36)
-    plt.yticks(fontsize=38)
+    ax.tick_params(axis='y', 
+                  which='major',
+                  width=3,
+                  length=10,
+                  labelsize=45,
+                  colors='black',
+                  direction='in',
+                  right=False,
+                  left=True,
+                  labelright=False,
+                  zorder=4)
     
     # Set y-axis limits with padding
     ymin = df_plot.min().min()
     ymax = df_plot.max().max()
-    y_padding = (ymax - ymin) * 0.12  # 稍微减小padding使图形更紧凑
+    y_padding = (ymax - ymin) * 0.12
     plt.ylim(ymin - y_padding, ymax + y_padding)
     
     # Add subtle background color
     plt.gca().set_facecolor('#f8f9fa')
-    plt.gca().spines['top'].set_visible(False)
-    plt.gca().spines['right'].set_visible(False)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
     
-    # 调整布局以避免标签被截断
-    plt.tight_layout(pad=1.2)  # 增加边距以确保大字体不被截断
+    # Adjust layout
+    plt.tight_layout()
     
     # Create output directory if needed
     os.makedirs(os.path.dirname(output_file), exist_ok=True)
@@ -151,7 +168,7 @@ def create_boxplot(data_dict, output_file='latency_boxplot.pdf'):
                 dpi=300, 
                 bbox_inches='tight', 
                 format='pdf',
-                facecolor='white',
+                transparent = True,
                 edgecolor='none')
     plt.close()
 
