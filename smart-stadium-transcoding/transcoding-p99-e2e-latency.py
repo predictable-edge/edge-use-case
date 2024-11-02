@@ -2,29 +2,22 @@ import os
 import re
 import argparse
 import numpy as np
-import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator
 from datetime import datetime
+import logging
 
 def parse_timestamp_folder(task_path):
     """
     Find the latest timestamp folder in the task directory
-    Args:
-        task_path: Path to the task directory
-    Returns:
-        Latest timestamp folder path or None if not found
     """
     try:
-        # List all timestamp folders
         folders = [f for f in os.listdir(task_path) if os.path.isdir(os.path.join(task_path, f))]
-        # Filter folders with timestamp format (YYYYMMDD-HHMMSSXXX)
         timestamp_folders = [f for f in folders if re.match(r'\d{8}-\d{9}', f)]
         
         if not timestamp_folders:
             return None
             
-        # Convert to datetime objects for comparison
         dated_folders = []
         for folder in timestamp_folders:
             try:
@@ -36,7 +29,6 @@ def parse_timestamp_folder(task_path):
         if not dated_folders:
             return None
             
-        # Get the latest timestamp folder
         latest_folder = max(dated_folders, key=lambda x: x[0])[1]
         return os.path.join(task_path, latest_folder)
     except Exception as e:
@@ -46,23 +38,15 @@ def parse_timestamp_folder(task_path):
 def read_latency_file(file_path):
     """
     Read and parse the latency log file
-    Args:
-        file_path: Path to the frame-1.log file
-    Returns:
-        List of latency values or None if file can't be read
     """
     try:
         latencies = []
         with open(file_path, 'r') as f:
             for line in f:
                 line = line.strip()
-                if not line:
-                    continue
-                # Skip header line
-                if line.startswith('Frame'):
+                if not line or line.startswith('Frame'):
                     continue
                     
-                # Extract latency value
                 match = re.search(r'(\d+)\s+ms', line)
                 if match:
                     latencies.append(int(match.group(1)))
@@ -75,10 +59,6 @@ def read_latency_file(file_path):
 def calculate_p99(latencies):
     """
     Calculate P99 latency from the data (using data from frame 400 onwards)
-    Args:
-        latencies: List of latency values
-    Returns:
-        P99 latency value
     """
     if len(latencies) < 400:
         return None
@@ -88,10 +68,7 @@ def calculate_p99(latencies):
 
 def plot_task_latencies(base_path, output_path):
     """
-    Create a line plot of P99 latencies across tasks
-    Args:
-        base_path: Base directory containing task folders
-        output_path: Path to save the output plot
+    Create a line plot of P99 latencies across multiple video processing tasks
     """
     # Collect task data
     task_data = []
@@ -126,51 +103,155 @@ def plot_task_latencies(base_path, output_path):
     if not task_data:
         print("No valid data found to plot")
         return
-    
+        
     # Sort data by task number
     task_data.sort(key=lambda x: x[0])
     
     # Create the plot
-    plt.figure(figsize=(12, 8), dpi=300)
+    plt.figure(figsize=(16, 10), dpi=300, facecolor='none')
+    ax = plt.gca()
+    ax.set_facecolor('none')
     
-    # Extract x and y values
+    # 提取数据
     x_values = [x[0] for x in task_data]
     y_values = [y[1] for y in task_data]
     
-    # Plot settings
+    # 设置y轴的最小值（给底部留一些空间）
+    y_min = -max(y_values) * 0.02  # 负值会被覆盖
+    y_max = max(y_values) * 1.10
+    
+    # 添加200ms阈值线和阴影区域
+    threshold = 200
+    plt.axhspan(y_min, threshold, 
+                color='#3498db', alpha=0.1, zorder=1)
+    threshold_line = plt.axhline(y=threshold, 
+                                color='#3498db', 
+                                linestyle='--', 
+                                linewidth=3, 
+                                alpha=0.8, 
+                                zorder=2)
+    
+    # 添加200ms标注
+    plt.annotate('SLA (200ms)', 
+                xy=(min(x_values), threshold),
+                xytext=(775, 5),  # 微调位置
+                textcoords='offset points',
+                fontsize=50,
+                fontweight='bold',
+                color='#3498db',
+                va='bottom',
+                ha='right')
+    
+    # 主曲线设置
     plt.plot(x_values, y_values, 
-             linewidth=1.2, 
-             color='#1f77b4',
+             linewidth=9.0,
+             color='#ff7f0e',
              marker='o',
-             markersize=6,
+             markersize=14,
              markerfacecolor='white',
-             markeredgecolor='#1f77b4',
-             markeredgewidth=1.5)
+             markeredgecolor='#ff7f0e',
+             markeredgewidth=3.0,
+             zorder=3)
     
-    # Customize the plot
-    plt.grid(True, linestyle='--', alpha=0.7, color='gray', linewidth=0.5)
-    plt.xlabel('Number of Tasks', fontsize=12, fontweight='bold')
-    plt.ylabel('P99 E2E Latency (ms)', fontsize=12, fontweight='bold')
-    plt.title('P99 E2E Latency vs Number of Tasks', fontsize=14, fontweight='bold', pad=20)
+    # 设置标签
+    plt.xlabel('Number of Processing Videos', 
+              fontsize=48,
+              fontweight='bold',
+              labelpad=20,
+              color='black')
+              
+    plt.ylabel('P99 Computing\nLatency (ms)',
+              fontsize=48,
+              fontweight='bold',
+              labelpad=5,
+              color='black')
     
-    # Set integer ticks for x-axis
-    ax = plt.gca()
+    # 设置刻度格式
+    ax.tick_params(axis='y', 
+                  which='major',
+                  width=3,
+                  length=10,
+                  labelsize=53,
+                  colors='black',
+                  direction='in',
+                  right=False,
+                  left=True,
+                  labelright=False,
+                  zorder=4)
+                  
+    ax.tick_params(axis='x',
+                  which='major',
+                  width=3,
+                  length=0,
+                  labelsize=60,
+                  colors='black')
+    
+    # 设置整数刻度
     ax.xaxis.set_major_locator(MaxNLocator(integer=True))
     
-    # Add points annotation
+    # 添加数值标注
     for x, y in zip(x_values, y_values):
         plt.annotate(f'{y:.0f}', 
                     (x, y), 
                     textcoords="offset points", 
-                    xytext=(0,10), 
+                    xytext=(0,15), 
                     ha='center',
-                    fontsize=8)
+                    fontsize=50,
+                    fontweight='bold',
+                    color='black')
     
-    # Adjust layout and save
-    plt.tight_layout()
-    plt.savefig(output_path, format='pdf', bbox_inches='tight', pad_inches=0.2)
-    print(f"Plot saved as: {output_path}")
+    # 设置轴线
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.spines['left'].set_color('black')
+    ax.spines['bottom'].set_color('black')
+    ax.spines['left'].set_linewidth(3)
+    ax.spines['bottom'].set_linewidth(3)
+    
+    # 设置y轴准线
+    ax.yaxis.grid(True, 
+                  linestyle='-', 
+                  linewidth=2,
+                  alpha=0.3,
+                  color='black',
+                  zorder=1,
+                  clip_on=True)
+    
+    # 设置x轴范围
+    x_min = min(x_values)
+    x_max = max(x_values)
+    x_margin = (x_max - x_min) * 0.1
+    plt.xlim(x_min - x_margin, x_max + x_margin)
+    
+    # 设置y轴范围并确保0点被覆盖
+    plt.ylim(y_min, y_max)
+    
+    # 调整y轴刻度以避免显示负值
+    y_ticks = ax.get_yticks()
+    ax.set_yticks([tick for tick in y_ticks if tick >= 0])
+    
+    # 调整布局
+    plt.tight_layout(pad=1.5)
+    
+    # 保存图片
+    if output_path:
+        ensure_dir_exists(output_path)
+        plt.savefig(output_path, 
+                   dpi=300, 
+                   bbox_inches='tight',
+                   facecolor='none',
+                   edgecolor='none',
+                   transparent=True,
+                   pad_inches=0.3)
+        print(f"Plot saved as: {output_path}")
+    
     plt.close()
+    
+
+def ensure_dir_exists(file_path):
+    directory = os.path.dirname(file_path)
+    if directory and not os.path.exists(directory):
+        os.makedirs(directory)
 
 def main():
     parser = argparse.ArgumentParser(description='Plot P99 latency across tasks.')
