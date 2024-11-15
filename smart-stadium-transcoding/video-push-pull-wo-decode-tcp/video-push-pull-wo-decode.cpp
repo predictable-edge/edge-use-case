@@ -504,7 +504,7 @@ void* pull_stream(void* args) {
 
     // Create a TimingLogger instance for this pull thread
     std::stringstream ss;
-    ss <<  "/home/zx/edge-use-case/smart-stadium-transcoding/result/video-push-pull-wo-decode-srt/task" << num_pull << "/" << get_timestamp_with_ms() << "/"
+    ss <<  "/home/zx/edge-use-case/smart-stadium-transcoding/result/video-push-pull-wo-decode-tcp/task" << num_pull << "/" << get_timestamp_with_ms() << "/"
        << "frame-" << index << ".log"; 
     std::string log_filename = ss.str();
     TimingLogger logger(log_filename);
@@ -519,9 +519,6 @@ void* pull_stream(void* args) {
     int ret = 0;
 
     AVDictionary* options = nullptr;
-    av_dict_set(&options, "flags", "low_delay", 0);
-    av_dict_set(&options, "latency", "0", 0);     // Latency in ms
-    av_dict_set(&options, "buffer_size", "1000000", 0);
 
     ret = avformat_open_input(&input_fmt_ctx, input_url, nullptr, &options);
     if (ret < 0) {
@@ -778,14 +775,10 @@ void* push_stream_directly(void* args) {
     out_stream->codecpar->codec_tag = 0;
 
     // Set up SRT options
-    AVDictionary* srt_options = NULL;
-    av_dict_set(&srt_options, "mode", "caller", 0);
-    av_dict_set(&srt_options, "streamid", "live", 0);
-    av_dict_set(&srt_options, "latency", "0", 0);
-    av_dict_set(&srt_options, "buffer_size", "1000000", 0);
+    AVDictionary* tcp_options = NULL;
 
     // Open output URL
-    ret = avio_open2(&output_fmt_ctx->pb, output_url, AVIO_FLAG_WRITE, NULL, &srt_options);
+    ret = avio_open2(&output_fmt_ctx->pb, output_url, AVIO_FLAG_WRITE, NULL, &tcp_options);
     CHECK_ERR(ret, "Could not open output URL");
 
     // Write header
@@ -980,14 +973,9 @@ void* push_stream(void* args) {
     ret = avcodec_parameters_from_context(out_video_stream->codecpar, video_enc_ctx);
     CHECK_ERR(ret, "Failed to copy video encoder parameters to output stream");
 
-    AVDictionary* srt_options = NULL;
-    av_dict_set(&srt_options, "mode", "caller", 0);
-    av_dict_set(&srt_options, "streamid", "live", 0);
-    av_dict_set(&srt_options, "latency", "0", 0);
-    av_dict_set(&srt_options, "buffer_size", "1000000", 0);
-    // av_dict_set(&srt_options, "maxbw", "100000000", 0);
+    AVDictionary* tcp_options = NULL;
 
-    ret = avio_open2(&output_fmt_ctx->pb, output_url, AVIO_FLAG_WRITE, NULL, &srt_options);
+    ret = avio_open2(&output_fmt_ctx->pb, output_url, AVIO_FLAG_WRITE, NULL, &tcp_options);
     CHECK_ERR(ret, "Could not open output URL");
 
     ret = avformat_write_header(output_fmt_ctx, NULL);
@@ -1079,7 +1067,7 @@ void* push_stream(void* args) {
 int main(int argc, char* argv[]) {
     if (argc < 4) {
         fprintf(stderr, "Usage: %s <push_input_file> <push_output_url> <pull_input_url1> [<pull_input_url2> ...]\n", argv[0]);
-        fprintf(stderr, "Example: %s snow-scene.mp4 \"srt://192.168.2.3:9000?mode=caller&streamid=live&latency=20&sndbuf=65536\" \"srt://192.168.2.2:10000?mode=listener&streamid=transcoded&latency=20&rcvbuf=65536\" \"srt://192.168.2.4:10001?mode=listener&streamid=transcoded2&latency=20&rcvbuf=65536\"\n", argv[0]);
+        fprintf(stderr, "Example: %s snow-scene.mp4 \"tcp://192.168.2.3:9000\" \"tcp://192.168.2.2:10000?listen=1\" \"tcp://192.168.2.2:10001?listen=1\"\n", argv[0]);
         return 1;
     }
 
