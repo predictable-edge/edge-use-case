@@ -104,45 +104,39 @@ def plot_task_latencies(base_path, output_path):
         print("No valid data found to plot")
         return
         
-    # Sort data by task number
     task_data.sort(key=lambda x: x[0])
     
-    # Create the plot
     plt.figure(figsize=(16, 10), dpi=300, facecolor='none')
     ax = plt.gca()
     ax.set_facecolor('none')
     
-    # 提取数据
     x_values = [x[0] for x in task_data]
     y_values = [y[1] for y in task_data]
     
-    # 设置y轴的最小值（给底部留一些空间）
-    y_min = -max(y_values) * 0.02  # 负值会被覆盖
+    y_min = -max(y_values) * 0.02 
     y_max = max(y_values) * 1.10
     
-    # 添加200ms阈值线和阴影区域
     threshold = 200
-    plt.axhspan(y_min, threshold, 
-                color='#3498db', alpha=0.1, zorder=1)
+    # plt.axhspan(y_min, threshold, 
+    #             color='#cc0000', alpha=0.1, zorder=1)
     threshold_line = plt.axhline(y=threshold, 
-                                color='#3498db', 
-                                linestyle='--', 
-                                linewidth=3, 
+                                color='#aa0000', 
+                                linestyle=(0, (1, 1)),
+                                # linestyle='dotted', 
+                                linewidth=12, 
                                 alpha=0.8, 
-                                zorder=2)
+                                zorder=10)
     
-    # 添加200ms标注
     plt.annotate('SLA (200ms)', 
                 xy=(min(x_values), threshold),
-                xytext=(775, 5),  # 微调位置
+                xytext=(775, 5),
                 textcoords='offset points',
                 fontsize=50,
                 fontweight='bold',
-                color='#3498db',
+                color='#cc0000',
                 va='bottom',
                 ha='right')
     
-    # 主曲线设置
     plt.plot(x_values, y_values, 
              linewidth=9.0,
              color='#ff7f0e',
@@ -153,7 +147,6 @@ def plot_task_latencies(base_path, output_path):
              markeredgewidth=3.0,
              zorder=3)
     
-    # 设置标签
     plt.xlabel('Number of Processing Videos', 
               fontsize=48,
               fontweight='bold',
@@ -166,7 +159,6 @@ def plot_task_latencies(base_path, output_path):
               labelpad=5,
               color='black')
     
-    # 设置刻度格式
     ax.tick_params(axis='y', 
                   which='major',
                   width=3,
@@ -186,10 +178,8 @@ def plot_task_latencies(base_path, output_path):
                   labelsize=60,
                   colors='black')
     
-    # 设置整数刻度
     ax.xaxis.set_major_locator(MaxNLocator(integer=True))
     
-    # 添加数值标注
     for x, y in zip(x_values, y_values):
         plt.annotate(f'{y:.0f}', 
                     (x, y), 
@@ -199,16 +189,14 @@ def plot_task_latencies(base_path, output_path):
                     fontsize=50,
                     fontweight='bold',
                     color='black')
-    
-    # 设置轴线
+
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
     ax.spines['left'].set_color('black')
     ax.spines['bottom'].set_color('black')
     ax.spines['left'].set_linewidth(3)
     ax.spines['bottom'].set_linewidth(3)
-    
-    # 设置y轴准线
+  
     ax.yaxis.grid(True, 
                   linestyle='-', 
                   linewidth=2,
@@ -217,23 +205,18 @@ def plot_task_latencies(base_path, output_path):
                   zorder=1,
                   clip_on=True)
     
-    # 设置x轴范围
     x_min = min(x_values)
     x_max = max(x_values)
     x_margin = (x_max - x_min) * 0.1
     plt.xlim(x_min - x_margin, x_max + x_margin)
     
-    # 设置y轴范围并确保0点被覆盖
     plt.ylim(y_min, y_max)
     
-    # 调整y轴刻度以避免显示负值
     y_ticks = ax.get_yticks()
     ax.set_yticks([tick for tick in y_ticks if tick >= 0])
     
-    # 调整布局
     plt.tight_layout(pad=1.5)
     
-    # 保存图片
     if output_path:
         ensure_dir_exists(output_path)
         plt.savefig(output_path, 
