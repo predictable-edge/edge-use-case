@@ -369,7 +369,7 @@ bool initialize_decoder(const char* input_url, DecoderInfo& decoder_info) {
 }
 
 // Encoder Initialization Function
-bool initialize_encoder(const EncoderConfig& config, EncoderInfo& encoder_info, AVRational input_time_base) {
+bool initialize_encoder(const EncoderConfig& config, EncoderInfo& encoder_info, AVRational input_time_base, int input_width, int input_height) {
     encoder_info.config = config;
     encoder_info.output_fmt_ctx = nullptr;
     encoder_info.encoder_ctx = nullptr;
@@ -482,7 +482,7 @@ bool initialize_encoder(const EncoderConfig& config, EncoderInfo& encoder_info, 
 
     // Initialize scaler
     encoder_info.sws_ctx = sws_getContext(
-        config.width, config.height, AV_PIX_FMT_YUV420P,
+        input_width, input_height, AV_PIX_FMT_YUV420P,
         encoder_info.encoder_ctx->width, encoder_info.encoder_ctx->height, encoder_info.encoder_ctx->pix_fmt,
         SWS_BILINEAR, nullptr, nullptr, nullptr
     );
@@ -606,7 +606,10 @@ bool init_filter_graph(FilterContextStruct& filter_ctx, AVCodecContext* dec_ctx,
     // const char* filter_descr = "hqdn3d=1.5:1.5:6:6,unsharp=5:5:1.0:5:5:0.0,eq=contrast=1.2:brightness=0.05:saturation=1.3";
     // const char* filter_descr = "atadenoise=0a=0.2:0b=0.2,unsharp=3:3:1.0:3:3:0.0,eq=contrast=1.2:brightness=0.05:saturation=1.3";
     // sharp large size: more cpu
-    const char* filter_descr = "unsharp=3:3:0.05:3:3:0.0, eq=contrast=1.2:brightness=0.05:saturation=1.3";
+    const char* filter_descr = "removegrain=5:0:0, unsharp=3:3:1:3:3:0.0, eq=contrast=1.2:brightness=0.05:saturation=1.3";
+    // const char* filter_descr = "removegrain=5:0:0";
+    // const char* filter_descr = "unsharp=3:3:1:3:3:0.0";
+
 
     AVFilterInOut* outputs = avfilter_inout_alloc();
     AVFilterInOut* inputs  = avfilter_inout_alloc();
@@ -802,20 +805,23 @@ void filter_thread_func(FrameQueue& decode_queue, std::vector<FrameQueue*>& enco
             auto filter_end = std::chrono::steady_clock::now();
 
             // Distribute the filtered frame to all encoder queues
-            FrameData filt_frame_data;
-            filt_frame_data.frame = filt_frame;
-            filt_frame_data.decode_start_time = frame_data.decode_start_time;
-            filt_frame_data.decode_end_time = frame_data.decode_end_time;
-            filt_frame_data.filter_start_time = filter_start;
-            filt_frame_data.filter_end_time = filter_end;
-            if (frame_count % 100 == 0) {
-                std::cout << "Filter " << frame_count << ", queue length: " << decode_queue.size() << std::endl;
-            }
-            frame_count++;
-            // Timing information can be updated here if needed
             for (auto& q : encoder_queues) {
-                q->push(filt_frame_data);
+                AVFrame* frame_clone = av_frame_clone(filt_frame);
+                if (!frame_clone) {
+                    std::cerr << "Could not clone frame for encoder queue." << std::endl;
+                    continue;
+                }
+
+                FrameData cloned_frame_data;
+                cloned_frame_data.frame = frame_clone;
+                cloned_frame_data.decode_start_time = frame_data.decode_start_time;
+                cloned_frame_data.decode_end_time = frame_data.decode_end_time;
+                cloned_frame_data.filter_start_time = filter_start;
+                cloned_frame_data.filter_end_time = filter_end;
+
+                q->push(cloned_frame_data);
             }
+            av_frame_free(&filt_frame);
         }
     }
 
@@ -898,7 +904,11 @@ bool encode_frames(const EncoderInfo& encoder_info, FrameQueue& frame_queue, AVR
         }
 
         // Set PTS
-        enc_frame->pts = frame_data.frame->pts;
+        if (frame_data.frame->pts != AV_NOPTS_VALUE) {
+            enc_frame->pts = av_rescale_q(frame_data.frame->pts, input_time_base, encoder_ctx->time_base);
+        } else {
+            enc_frame->pts = frame_count;
+        }
 
         // Send frame to encoder
         int ret = avcodec_send_frame(encoder_ctx, enc_frame);
@@ -1088,7 +1098,7 @@ int main(int argc, char* argv[]) {
     std::vector<EncoderInfo> encoder_infos;
     for (size_t i = 0; i < encoder_configs.size(); ++i) {
         EncoderInfo encoder_info;
-        if (!initialize_encoder(encoder_configs[i], encoder_info, decoder_info.input_time_base)) {
+        if (!initialize_encoder(encoder_configs[i], encoder_info, decoder_info.input_time_base, decoder_info.decoder_ctx->width, decoder_info.decoder_ctx->height)) {
             std::cerr << "Failed to initialize encoder for " << encoder_configs[i].output_url << std::endl;
             // Handle error: cleanup and exit or skip this encoder
             continue;
