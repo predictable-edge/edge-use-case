@@ -37,12 +37,21 @@ def process_all_folders(root_folder, name_mapping=None, skip_rows=650):
     Process data from all subfolders with custom ordering
     """
     # Define default mapping if none provided
+    # if name_mapping is None:
+    #     name_mapping = {
+    #         'E2E_wo_WC': 'E2E w/o wireless path',
+    #         'E2E': 'E2E w/ wireless path',
+    #         'E2E_w_Contention': 'E2E w/ wireless contention',
+    #         'E2E_w_all_Contention': 'E2E w/ wireless and\ncompute contention'
+    #     }
     if name_mapping is None:
         name_mapping = {
-            'E2E_wo_WC': 'E2E w/o Wireless Communication',
-            'E2E': 'E2E w Wireless Communication',
-            'E2E_w_Contention': 'E2E w Wireless Contention',
-            'E2E_w_all_Contention': 'E2E w both Wireless\nand Computing Contentions'
+            'E2E-wo-wireless': 'w/o wireless',
+            'E2E-wo-wireless-w-computing': 'w/o wireless w/ compute contention',
+            'E2E-w-wireless': 'w/ wireless path',
+            'E2E-w-wireless-dl-contention': 'w/ wireless contention',
+            'E2E-w-wireless-computing': 'w/ wireless path  and compute contention',
+            'E2E-w-all-contention': 'w/ wireless and compute contention'
         }
     
     # Define order for display
@@ -75,8 +84,6 @@ def process_all_folders(root_folder, name_mapping=None, skip_rows=650):
     
     return final_data
 
-# [前面的代码保持不变，修改 create_boxplot 函数]
-
 def create_boxplot(data_dict, output_file='latency_boxplot.pdf'):
     """
     Create an enhanced boxplot visualization with legend inside the plot
@@ -85,13 +92,14 @@ def create_boxplot(data_dict, output_file='latency_boxplot.pdf'):
     plt.style.use('seaborn-v0_8-whitegrid')
     
     # Create figure with adjusted size
-    plt.figure(figsize=(13, 8))
+    plt.figure(figsize=(13, 10))
     
     # Create DataFrame for plotting
     df_plot = pd.DataFrame(data_dict)
     
     # Custom color palette - added fourth color
-    colors = ["#2ecc71", "#3498db", "#e74c3c", "#9b59b6"]
+    base_colors = ["#2ecc71", "#3498db", "#e74c3c", "#9b59b6", "#f1c40f", "#6abc9d"]
+    colors = base_colors[:len(data_dict)]
     
     # Create boxplot with enhanced styling
     box_plot = sns.boxplot(data=df_plot,
@@ -120,7 +128,7 @@ def create_boxplot(data_dict, output_file='latency_boxplot.pdf'):
               loc='upper left',  # Changed to upper right inside the plot
               bbox_to_anchor=(-0.02, 0.99))  # Adjusted to keep some padding from the edges
     
-    plt.ylabel('Latency (ms)', fontsize=45, labelpad=5, fontweight='bold')
+    plt.ylabel('E2E Latency (ms)', fontsize=45, labelpad=5, fontweight='bold')
     
     # Format axis with thicker lines
     ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{int(x)}'))
@@ -193,7 +201,7 @@ def main():
     parser.add_argument(
         '-s', '--skip',
         type=int,
-        default=650,
+        default=1100,
         help='Number of initial rows to skip (default: 650)'
     )
     
