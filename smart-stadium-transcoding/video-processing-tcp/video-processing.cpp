@@ -606,8 +606,8 @@ bool init_filter_graph(FilterContextStruct& filter_ctx, AVCodecContext* dec_ctx,
     // const char* filter_descr = "hqdn3d=1.5:1.5:6:6,unsharp=5:5:1.0:5:5:0.0,eq=contrast=1.2:brightness=0.05:saturation=1.3";
     // const char* filter_descr = "atadenoise=0a=0.2:0b=0.2,unsharp=3:3:1.0:3:3:0.0,eq=contrast=1.2:brightness=0.05:saturation=1.3";
     // sharp large size: more cpu
-    const char* filter_descr = "removegrain=5:0:0, unsharp=3:3:1:3:3:0.0, eq=contrast=1.2:brightness=0.05:saturation=1.3";
-    // const char* filter_descr = "removegrain=5:0:0";
+    // const char* filter_descr = "removegrain=5:0:0, unsharp=3:3:1:3:3:0.0, eq=contrast=1.2:brightness=0.05:saturation=1.3";
+    const char* filter_descr = "removegrain=5:0:0";
     // const char* filter_descr = "unsharp=3:3:1:3:3:0.0";
 
 

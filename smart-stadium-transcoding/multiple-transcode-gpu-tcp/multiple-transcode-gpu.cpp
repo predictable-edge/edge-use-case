@@ -898,7 +898,6 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
                 // Rescale packet timestamp
                 av_packet_rescale_ts(enc_pkt, encoder_ctx->time_base, out_stream->time_base);
                 enc_pkt->stream_index = out_stream->index;
-                // std::cout << filt_frame->pts << ": " << get_timestamp_with_ms() << std::endl;
 
                 // Write packet to output
                 int write_ret = av_interleaved_write_frame(output_fmt_ctx, enc_pkt);
@@ -907,6 +906,7 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
                     av_packet_free(&enc_pkt);
                     break;
                 }
+                // std::cout << filt_frame->pts << ": " << get_timestamp_with_ms() << std::endl;
 
                 av_packet_free(&enc_pkt);
             }
