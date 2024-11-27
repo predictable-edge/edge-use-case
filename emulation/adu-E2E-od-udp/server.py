@@ -50,18 +50,15 @@ def server_main(destination_ip, destination_port):
             # If it's a new request from this client, create a RequestHandler
             if key not in requests:
                 requests[key] = RequestHandler(request_id, total_packets, addr)
-                print(f"New request {request_id} from {addr} with {total_packets} packets.")
 
             handler = requests[key]
             handler.add_packet(seq_num)
-            print(f"Received packet {seq_num}/{total_packets} for request {request_id} from {addr}.")
 
             # If all packets are received, send a response including the request_id
             if handler.is_complete():
                 # Create response packet with request_id
                 response = struct.pack('!I', request_id)
                 send_socket.sendto(response, (destination_ip, destination_port))
-                print(f"Sent response for request {request_id} to {destination_ip}:{destination_port}.")
                 del requests[key]  # Remove the completed request
         except Exception as e:
             print(f"An error occurred: {e}")
