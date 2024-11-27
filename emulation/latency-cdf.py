@@ -4,18 +4,24 @@ import numpy as np
 import matplotlib.pyplot as plt
 from datetime import datetime
 
-def parse_latency_file(file_path):
+def parse_latency_file(file_path, start_line=0):
     """
-    Parse the latency file and extract latency values.
+    Parse the latency file and extract latency values starting from specified line.
     
     Args:
         file_path (str): Path to the input latency file
+        start_line (int): Line number to start parsing from (0-based index)
     
     Returns:
         numpy.ndarray: Array of latency values
     """
     latencies = []
     with open(file_path, 'r') as f:
+        # Skip lines before start_line
+        for _ in range(start_line):
+            next(f, None)
+        
+        # Process remaining lines
         for line in f:
             try:
                 # Extract latency value (assuming format is "Label Latency X ms")
@@ -26,22 +32,23 @@ def parse_latency_file(file_path):
                 continue
     return np.array(latencies)
 
-def generate_cdf_plot(latencies, output_path):
+def generate_cdf_plot(latencies, output_path, start_line):
     """
     Generate and save a Cumulative Distribution Function (CDF) plot.
     
     Args:
         latencies (numpy.ndarray): Array of latency values
         output_path (str): Path to save the output plot
+        start_line (int): Starting line number used for data
     """
     # Set up the plot with a clean, professional look
     plt.figure(figsize=(10, 6))
     plt.rcParams.update({
-        'font.size': 10,
-        'axes.labelsize': 12,
-        'axes.titlesize': 14,
-        'xtick.labelsize': 10,
-        'ytick.labelsize': 10
+        'font.size': 20,
+        'axes.labelsize': 22,
+        'axes.titlesize': 24,
+        'xtick.labelsize': 20,
+        'ytick.labelsize': 20
     })
     
     # Sort latencies and calculate CDF
@@ -53,13 +60,13 @@ def generate_cdf_plot(latencies, output_path):
     plt.fill_between(sorted_latencies, cdf, alpha=0.3, color='#87CEFA')
     
     # Customize plot
-    plt.title('Latency Cumulative Distribution Function', fontweight='bold')
+    plt.title(f'Latency CDF', fontweight='bold')
     plt.xlabel('Latency (ms)')
     plt.ylabel('Cumulative Probability')
     plt.grid(True, linestyle='--', alpha=0.7)
     
     # Add percentile lines
-    percentiles = [50, 90, 95, 99]
+    percentiles = [50, 99]
     for p in percentiles:
         percentile_value = np.percentile(sorted_latencies, p)
         plt.axhline(p/100, color='red', linestyle='--', alpha=0.7)
@@ -84,31 +91,47 @@ def find_top_percentile_data(latencies, percentile=1):
         percentile (float): Percentile threshold
     
     Returns:
-        numpy.ndarray: Latency values above the specified percentile
+        tuple: (indices of top percentile latencies, top percentile latency values)
     """
     threshold = np.percentile(latencies, 100 - percentile)
-    return latencies[latencies >= threshold]
+    top_percentile_mask = latencies >= threshold
+    top_percentile_indices = np.where(top_percentile_mask)[0]
+    top_percentile_values = latencies[top_percentile_mask]
+    
+    return top_percentile_indices, top_percentile_values
 
 def main():
     # Set up argument parsing
     parser = argparse.ArgumentParser(description='Latency CDF Analysis')
     parser.add_argument('input_path', type=str, help='Input latency file path')
+    parser.add_argument('--start-line', type=int, default=0, 
+                      help='Line number to start analysis from (0-based index)')
     args = parser.parse_args()
     
-    # Read latencies
-    latencies = parse_latency_file(args.input_path)
+    # Read latencies starting from specified line
+    latencies = parse_latency_file(args.input_path, args.start_line)
     
     # Generate output paths
     # Replace 'result' with 'figure' and 'latency.txt' with 'latency.pdf'
     figure_path = args.input_path.replace('result', 'figure').replace('latency.txt', 'latency.pdf')
     
     # Generate CDF plot
-    generate_cdf_plot(latencies, figure_path)
+    generate_cdf_plot(latencies, figure_path, args.start_line)
     
-    # Find and print top 1% latency values
-    top_percentile = find_top_percentile_data(latencies)
-    print(f"\nTop 1% Latency Value (above {np.percentile(latencies, 99):.2f} ms):")
-    print(f"Largest value: {top_percentile[-1]:.2f} ms")
+    # Find top 1% latency values and their indices
+    top_percentile_indices, top_percentile_values = find_top_percentile_data(latencies)
+    
+    print(f"\nAnalyzing data starting from line {args.start_line}")
+    print(f"Total data points analyzed: {len(latencies)}")
+    print(f"\nTop 1% Latency Values (above {np.percentile(latencies, 99):.2f} ms):")
+    print("Index\tLatency (ms)")
+    prev_idx = None
+    for idx, value in zip(top_percentile_indices, top_percentile_values):
+        actual_idx = idx + args.start_line
+        if prev_idx is not None and actual_idx > prev_idx + 1:
+            print()  # Add empty line for non-consecutive indices
+        print(f"{actual_idx}\t{value:.2f}")
+        prev_idx = actual_idx
     
     print(f"\nCDF Plot saved to: {figure_path}")
 
