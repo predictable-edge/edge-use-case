@@ -118,7 +118,6 @@ def receive_responses(listen_port, num_requests, send_times, lock, result_dir):
             # Write the header
             header = f"{'Label':<15}{'Latency':>15}"
             f.write(header + '\n')
-            print(header)
 
             while True:
                 try:
@@ -135,11 +134,10 @@ def receive_responses(listen_port, num_requests, send_times, lock, result_dir):
                         if request_id in send_times:
                             send_time = send_times[request_id]
                             latency = (receive_time - send_time) * 1000  # Convert to ms
-                            label = f"Request {request_id}"
+                            label = f"{request_id}"
                             latency_str = f"{latency:.2f} ms"
                             line = f"{label:<15}{latency_str:>15}"
                             f.write(line + '\n')
-                            print(line)
                             received_requests.add(request_id)
                         else:
                             print(f"Received unknown request_id {request_id} from {addr}")
