@@ -13,10 +13,12 @@
 #include <map>
 #include <iomanip>
 
+// Define default payload size
 #define DEFAULT_PAYLOAD_SIZE 1400
 
 std::mutex mtx;
 
+// Structure to keep track of each flow's index and send time
 struct RequestInfo {
     uint32_t index;
     std::chrono::high_resolution_clock::time_point start_time;
@@ -37,6 +39,7 @@ bool send_payload_size(int client_socket, uint32_t payload_size) {
 // Function to send payloads periodically to the server
 void send_payloads(int client_socket, uint32_t num_requests, uint32_t payload_size, uint32_t interval_ms, std::deque<RequestInfo>& send_queue, bool& sending_done) {
     for (uint32_t request_index = 0; request_index < num_requests; ++request_index) {
+        // Record the send start time
         auto start_time = std::chrono::high_resolution_clock::now();
 
         // Prepare the payload (filled with zeros)
@@ -54,6 +57,7 @@ void send_payloads(int client_socket, uint32_t num_requests, uint32_t payload_si
             total_sent += bytes_sent;
         }
 
+        // Push the RequestInfo to the queue after successful send
         {
             std::lock_guard<std::mutex> lock(mtx);
             send_queue.push_back({request_index, start_time});
@@ -61,7 +65,8 @@ void send_payloads(int client_socket, uint32_t num_requests, uint32_t payload_si
 
         // Calculate elapsed time and adjust sleep accordingly
         auto send_duration = std::chrono::high_resolution_clock::now() - start_time;
-        int64_t remaining_time_ms = interval_ms - std::chrono::duration_cast<std::chrono::milliseconds>(send_duration).count();
+        int64_t elapsed_time_ms = std::chrono::duration_cast<std::chrono::milliseconds>(send_duration).count();
+        int64_t remaining_time_ms = interval_ms - elapsed_time_ms;
         if (remaining_time_ms > 0) {
             std::this_thread::sleep_for(std::chrono::milliseconds(remaining_time_ms));
         } else {
@@ -72,12 +77,13 @@ void send_payloads(int client_socket, uint32_t num_requests, uint32_t payload_si
 }
 
 // Function to receive responses from the server
-void receive_responses(int client_socket, std::deque<RequestInfo>& send_queue, std::map<uint32_t, double>& latency_results, bool& sending_done) {
+void receive_responses(int client_socket, uint32_t num_requests, std::deque<RequestInfo>& send_queue, std::map<uint32_t, double>& latency_results, bool& sending_done) {
     fd_set read_fds;
     timeval timeout;
     char buffer[4];
+    uint32_t received_flows = 0;
 
-    while (!sending_done || !send_queue.empty()) {
+    while (received_flows < num_requests || !send_queue.empty() || !sending_done) {
         FD_ZERO(&read_fds);
         FD_SET(client_socket, &read_fds);
 
@@ -118,6 +124,8 @@ void receive_responses(int client_socket, std::deque<RequestInfo>& send_queue, s
                 latency_results[req_info.index] = latency;
 
                 std::cout << "Request " << req_info.index << " latency: " << latency << " ms" << std::endl;
+
+                received_flows++;
             } else if (bytes_received == 0) {
                 // Connection closed
                 std::cerr << "Connection closed by server." << std::endl;
@@ -153,7 +161,7 @@ int main(int argc, char* argv[]) {
     // Optional arguments
     for (int i = 5; i < argc; ++i) {
         if (strcmp(argv[i], "--port") == 0 && i + 1 < argc) {
-            port = std::stoi(argv[++i]);
+            port = static_cast<uint16_t>(std::stoi(argv[++i]));
         }
     }
 
@@ -164,7 +172,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // Connect to server
+    // Configure server address
     sockaddr_in server_addr{};
     server_addr.sin_family = AF_INET;
     server_addr.sin_port = htons(port);
@@ -174,6 +182,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    // Connect to server
     if (connect(client_socket, (sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
         std::cerr << "Failed to connect to server." << std::endl;
         close(client_socket);
@@ -193,10 +202,13 @@ int main(int argc, char* argv[]) {
     std::map<uint32_t, double> latency_results;
     bool sending_done = false;
 
-    // Start sender and receiver threads
-    std::thread sender_thread(send_payloads, client_socket, num_requests, payload_size, interval_ms, std::ref(send_queue), std::ref(sending_done));
-    std::thread receiver_thread(receive_responses, client_socket, std::ref(send_queue), std::ref(latency_results), std::ref(sending_done));
+    // Start receiver thread first to ensure it's ready to receive responses
+    std::thread receiver_thread(receive_responses, client_socket, num_requests, std::ref(send_queue), std::ref(latency_results), std::ref(sending_done));
 
+    // Start sender thread
+    std::thread sender_thread(send_payloads, client_socket, num_requests, payload_size, interval_ms, std::ref(send_queue), std::ref(sending_done));
+
+    // Wait for both threads to finish
     sender_thread.join();
     receiver_thread.join();
 
@@ -205,6 +217,10 @@ int main(int argc, char* argv[]) {
 
     // Write latency results to file
     std::ofstream output_file("latency.txt");
+    if (!output_file.is_open()) {
+        std::cerr << "Failed to open latency.txt for writing." << std::endl;
+        return 1;
+    }
     output_file << std::left << std::setw(10) << "Index" << std::setw(15) << "Latency(ms)" << std::endl;
     for (const auto& [index, latency] : latency_results) {
         output_file << std::left << std::setw(10) << index << std::setw(15) << std::fixed << std::setprecision(2) << latency << std::endl;
