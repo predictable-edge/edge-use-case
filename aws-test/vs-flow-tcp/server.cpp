@@ -6,10 +6,11 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <sys/socket.h>
 
-// Define the size of each flow (initial flow size) and payload
-#define FLOW_SIZE_BYTES 1400
+// Define the maximum buffer size
+#define MAX_BUFFER_SIZE 10000
 
 /**
  * @brief Receives exactly 'length' bytes from the socket.
@@ -68,17 +69,22 @@ void handle_client(int client_sock, sockaddr_in client_addr) {
         }
 
         // Here you can process the received data as needed
-        // For this example, we simply acknowledge receipt by sending back the same data
+        // For this example, we simply echo back the same data
 
         // Send the same fixed-size flow back to the client
-        ssize_t bytes_sent = send(client_sock, buffer.data(), flow_size, 0);
-        if (bytes_sent != static_cast<ssize_t>(flow_size)) {
-            std::cerr << "Failed to send response to client " << client_ip << ":" << client_port << "." << std::endl;
-            break;
+        size_t total_sent = 0;
+        while (total_sent < flow_size) {
+            ssize_t bytes_sent = send(client_sock, buffer.data() + total_sent, flow_size - total_sent, 0);
+            if (bytes_sent <= 0) {
+                std::cerr << "Failed to send response to client " << client_ip << ":" << client_port << "." << std::endl;
+                close(client_sock);
+                return;
+            }
+            total_sent += bytes_sent;
         }
 
         // Optional: Print debug information
-        std::cout << "Received and responded with " << flow_size << " bytes to client " << client_ip << ":" << client_port << "." << std::endl;
+        std::cout << "Echoed back " << flow_size << " bytes to client " << client_ip << ":" << client_port << "." << std::endl;
     }
 
     // Close the client socket
@@ -103,6 +109,13 @@ void start_server(uint16_t port = 10000) {
     int opt = 1;
     if (setsockopt(server_sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
         std::cerr << "Failed to set socket options." << std::endl;
+        close(server_sock);
+        exit(EXIT_FAILURE);
+    }
+
+    // Disable Nagle's algorithm to send data immediately
+    if (setsockopt(server_sock, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt)) < 0) {
+        std::cerr << "Failed to disable Nagle's algorithm." << std::endl;
         close(server_sock);
         exit(EXIT_FAILURE);
     }
@@ -137,6 +150,14 @@ void start_server(uint16_t port = 10000) {
         if (client_sock < 0) {
             std::cerr << "Failed to accept incoming connection." << std::endl;
             continue; // Continue accepting new connections
+        }
+
+        // Disable Nagle's algorithm for client socket
+        int opt_nodelay = 1;
+        if (setsockopt(client_sock, IPPROTO_TCP, TCP_NODELAY, &opt_nodelay, sizeof(opt_nodelay)) < 0) {
+            std::cerr << "Failed to disable Nagle's algorithm for client socket." << std::endl;
+            close(client_sock);
+            continue;
         }
 
         // Handle the client in a new thread

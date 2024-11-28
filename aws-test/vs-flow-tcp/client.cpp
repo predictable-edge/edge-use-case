@@ -8,13 +8,14 @@
 #include <chrono>
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #include <map>
 #include <iomanip>
 
-// Define the default flow size
-#define DEFAULT_FLOW_SIZE 1000
+// Define the maximum buffer size
+#define MAX_BUFFER_SIZE 10000
 
 std::mutex mtx;
 
@@ -56,6 +57,11 @@ void send_flows(int client_socket, uint32_t num_requests, uint32_t flow_size, ui
     for (uint32_t request_index = 0; request_index < num_requests; ++request_index) {
         auto start_time = std::chrono::high_resolution_clock::now();
 
+        {
+            std::lock_guard<std::mutex> lock(mtx);
+            send_queue.push_back({request_index, start_time});
+        }
+
         // Prepare the payload (filled with zeros)
         std::vector<char> payload(flow_size, 0);
 
@@ -69,11 +75,6 @@ void send_flows(int client_socket, uint32_t num_requests, uint32_t flow_size, ui
                 return;
             }
             total_sent += bytes_sent;
-        }
-
-        {
-            std::lock_guard<std::mutex> lock(mtx);
-            send_queue.push_back({request_index, start_time});
         }
 
         // Calculate elapsed time and adjust sleep accordingly
@@ -100,7 +101,7 @@ void send_flows(int client_socket, uint32_t num_requests, uint32_t flow_size, ui
 void receive_responses(int client_socket, std::deque<RequestInfo>& send_queue, std::map<uint32_t, double>& latency_results, bool& sending_done) {
     fd_set read_fds;
     timeval timeout;
-    char buffer[DEFAULT_FLOW_SIZE];
+    char buffer[MAX_BUFFER_SIZE];
     std::vector<char> recv_buffer;
 
     while (!sending_done || !send_queue.empty()) {
@@ -117,31 +118,32 @@ void receive_responses(int client_socket, std::deque<RequestInfo>& send_queue, s
             if (bytes_received > 0) {
                 recv_buffer.insert(recv_buffer.end(), buffer, buffer + bytes_received);
 
-                while (recv_buffer.size() >= DEFAULT_FLOW_SIZE) {
-                    std::vector<char> packet(recv_buffer.begin(), recv_buffer.begin() + DEFAULT_FLOW_SIZE);
-                    recv_buffer.erase(recv_buffer.begin(), recv_buffer.begin() + DEFAULT_FLOW_SIZE);
+                while (recv_buffer.size() >= MAX_BUFFER_SIZE) {
+                    std::vector<char> packet(recv_buffer.begin(), recv_buffer.begin() + MAX_BUFFER_SIZE);
+                    recv_buffer.erase(recv_buffer.begin(), recv_buffer.begin() + MAX_BUFFER_SIZE);
 
                     // Process the received packet (in this case, we just acknowledge it)
                     // You can add verification if needed
 
                     RequestInfo req_info;
+                    bool found = false;
                     {
                         std::lock_guard<std::mutex> lock(mtx);
                         if (!send_queue.empty()) {
                             req_info = send_queue.front();
                             send_queue.pop_front();
-                        } else {
-                            std::cerr << "No matching request info for the received response." << std::endl;
-                            continue;
+                            found = true;
                         }
                     }
 
-                    // Calculate latency
-                    auto end_time = std::chrono::high_resolution_clock::now();
-                    double latency = std::chrono::duration<double, std::milli>(end_time - req_info.start_time).count();
-                    latency_results[req_info.index] = latency;
+                    if (found) {
+                        // Calculate latency
+                        auto end_time = std::chrono::high_resolution_clock::now();
+                        double latency = std::chrono::duration<double, std::milli>(end_time - req_info.start_time).count();
+                        latency_results[req_info.index] = latency;
 
-                    std::cout << "Flow " << req_info.index << " latency: " << latency << " ms" << std::endl;
+                        std::cout << "Flow " << req_info.index << " latency: " << latency << " ms" << std::endl;
+                    }
                 }
             } else if (bytes_received == 0) {
                 // Connection closed
@@ -186,6 +188,14 @@ int main(int argc, char* argv[]) {
     int client_socket = socket(AF_INET, SOCK_STREAM, 0);
     if (client_socket < 0) {
         std::cerr << "Failed to create socket." << std::endl;
+        return 1;
+    }
+
+    // Disable Nagle's algorithm to send data immediately
+    int opt = 1;
+    if (setsockopt(client_socket, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt)) < 0) {
+        std::cerr << "Failed to disable Nagle's algorithm." << std::endl;
+        close(client_socket);
         return 1;
     }
 
