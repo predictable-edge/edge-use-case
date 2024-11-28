@@ -39,11 +39,9 @@ def handle_datagram(data, client_address, server_socket, clients_lock, clients_d
             # Send response back to client with the request_index
             response = request_index.to_bytes(4, byteorder='big')
             server_socket.sendto(response, client_address)
-            print(f"Server sent response to {client_address} for request {request_index}")
             # Remove the completed request
             del client_requests[request_index]
 
-    print(f"Server received packet from {client_address} - Request Index: {request_index}, Sequence Number: {sequence_number}")
 
 def start_server(port=10050):
     """Starts the UDP server on the specified port."""

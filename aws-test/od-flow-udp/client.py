@@ -28,7 +28,6 @@ def send_requests(client_socket, server_address, num_requests, packets_per_reque
     """Thread function to send requests to the server."""
     for request_index in range(num_requests):
         request_start_time = time.time()
-        print(f"Sending request {request_index} from client {client_socket.getsockname()}")
 
         # Send data packets for the current request
         for sequence_number in range(packets_per_request):
@@ -67,7 +66,6 @@ def receive_responses(client_socket):
         try:
             # Receive response from server
             response, server = client_socket.recvfrom(1024)  # Buffer size can be larger
-            print(f"Client {client_socket.getsockname()} received response from {server}")
 
             if len(response) < 4:
                 print("Received incomplete response from server. Ignoring.")
