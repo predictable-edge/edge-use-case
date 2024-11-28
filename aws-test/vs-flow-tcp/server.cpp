@@ -11,7 +11,7 @@
 #include <sys/socket.h>
 
 // Define the size of each packet
-#define PACKET_SIZE 1500
+#define PACKET_SIZE 1400
 
 /**
  * @brief Receives exactly 'length' bytes from the socket.

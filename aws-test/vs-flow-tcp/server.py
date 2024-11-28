@@ -31,7 +31,7 @@ def start_server(port=10000):
         
         while True:
             # Receive data packet from client
-            data = recv_all(conn, 1500)
+            data = recv_all(conn, 1400)
             if data is None:
                 print("Connection closed by client.")
                 break  # Exit the inner loop and wait for a new connection
@@ -55,7 +55,7 @@ def start_server(port=10000):
                     response += total_packets.to_bytes(4, byteorder='big')
                     response += seq_num.to_bytes(4, byteorder='big')
                     # Pad the rest of the packet to 1500 bytes if necessary
-                    response += b'\x00' * (1500 - len(response))
+                    response += b'\x00' * (1400 - len(response))
                     conn.sendall(response)
                 print(f"Responded to request {request_index} with {total_packets} packets")
                 # Remove the request from the dictionary

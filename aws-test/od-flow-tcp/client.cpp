@@ -13,7 +13,7 @@
 #include <map>
 #include <iomanip>
 
-#define PACKET_SIZE 1500
+#define PACKET_SIZE 1400
 
 std::mutex mtx;
 

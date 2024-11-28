@@ -31,7 +31,7 @@ def start_server(port=10000):
         
         while True:
             # Receive data packet from client
-            data = recv_all(conn, 1500)
+            data = recv_all(conn, 1400)
             if data is None:
                 print("Connection closed by client.")
                 break  # Exit the inner loop and wait for a new connection

@@ -12,7 +12,7 @@ def parse_arguments():
     parser.add_argument('packets_per_request', type=int, help='Number of data packets per request')
     parser.add_argument('interval_ms', type=float, help='Interval between requests in milliseconds')
     parser.add_argument('--port', type=int, default=10000, help='Server port (default: 10000)')
-    parser.add_argument('--packet_size', type=int, default=1500, help='Data packet size in bytes (default: 1500)')
+    parser.add_argument('--packet_size', type=int, default=1400, help='Data packet size in bytes (default: 1400)')
     return parser.parse_args()
 
 def send_requests(client_socket, num_requests, packets_per_request, interval_ms, packet_size, start_times, sending_done, data_lock):
