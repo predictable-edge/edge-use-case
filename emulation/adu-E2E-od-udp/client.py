@@ -65,8 +65,8 @@ def send_requests(server_ip, server_port, num_requests, num_packets, interval_ms
         for seq_num in range(1, num_packets + 1):
             # Pack request_id, total_packets, and sequence number into the first 12 bytes
             header = struct.pack('!III', request_id, num_packets, seq_num)
-            # Fill the rest of the packet to make it 1500 bytes
-            payload = header + b'\0' * (1500 - 12)
+            # Fill the rest of the packet to make it 1400 bytes
+            payload = header + b'\0' * (1400 - 12)
             try:
                 send_socket.sendto(payload, (server_ip, server_port))
             except Exception as e:
