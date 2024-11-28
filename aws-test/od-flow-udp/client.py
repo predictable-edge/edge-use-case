@@ -9,6 +9,7 @@ from collections import deque
 send_queue = deque()    # Queue of request indices sent but not yet acknowledged
 start_times = {}        # Dictionary to store start times for each request
 latency_results = {}    # Dictionary to store latency results
+request_timeouts = {}   # Dictionary to store expected timeout times for each request
 sending_done = threading.Event()  # Event to signal when sending is complete
 data_lock = threading.Lock()      # Lock for thread-safe operations on shared data
 
@@ -22,9 +23,10 @@ def parse_arguments():
     parser.add_argument('--port', type=int, default=10050, help='Server port (default: 10050)')
     parser.add_argument('--packet_size', type=int, default=512, help='Data packet size in bytes (default: 512)')
     parser.add_argument('--bind_port', type=int, help='Local port to bind the client socket to')
+    parser.add_argument('--response_timeout', type=float, default=5.0, help='Maximum time to wait for a response in seconds (default: 5.0)')
     return parser.parse_args()
 
-def send_requests(client_socket, server_address, num_requests, packets_per_request, interval_ms, packet_size):
+def send_requests(client_socket, server_address, num_requests, packets_per_request, interval_ms, packet_size, response_timeout):
     """Thread function to send requests to the server."""
     for request_index in range(num_requests):
         request_start_time = time.time()
@@ -47,6 +49,8 @@ def send_requests(client_socket, server_address, num_requests, packets_per_reque
         with data_lock:
             start_times[request_index] = request_start_time
             send_queue.append(request_index)
+            # Set the expected timeout time for this request
+            request_timeouts[request_index] = request_start_time + response_timeout
 
         # Calculate elapsed time and adjust sleep accordingly
         elapsed_time_ms = (time.time() - request_start_time) * 1000
@@ -60,9 +64,23 @@ def send_requests(client_socket, server_address, num_requests, packets_per_reque
     sending_done.set()
     print("Sending done.")
 
-def receive_responses(client_socket):
+def receive_responses(client_socket, response_timeout):
     """Thread function to receive responses from the server."""
-    while not sending_done.is_set() or send_queue:
+    while True:
+        with data_lock:
+            # Check if all requests have been processed
+            if sending_done.is_set() and not send_queue:
+                break
+
+            # Remove requests that have timed out
+            current_time = time.time()
+            timed_out_requests = [req_index for req_index in list(send_queue) if request_timeouts.get(req_index, 0) <= current_time]
+            for req_index in timed_out_requests:
+                print(f"Request {req_index} timed out.")
+                send_queue.remove(req_index)
+                del start_times[req_index]
+                del request_timeouts[req_index]
+
         try:
             # Receive response from server
             response, server = client_socket.recvfrom(1024)  # Buffer size can be larger
@@ -87,10 +105,11 @@ def receive_responses(client_socket):
                         send_queue.remove(request_index)
                     except ValueError:
                         pass  # Already removed or not present
-                    # Remove the start time as it's no longer needed
+                    # Remove the start time and timeout as they're no longer needed
                     del start_times[request_index]
+                    del request_timeouts[request_index]
                 else:
-                    print(f"Received response for unknown request {request_index}")
+                    print(f"Received response for unknown or timed-out request {request_index}")
         except socket.timeout:
             # No data received within timeout
             continue
@@ -102,8 +121,6 @@ def receive_responses(client_socket):
             traceback.print_exc()
             break
 
-    # Wait a bit to ensure all responses are received
-    time.sleep(2)
     print("Receiving done.")
 
 def write_latency_results():
@@ -126,6 +143,7 @@ def main():
     port = args.port
     packet_size = args.packet_size
     bind_port = args.bind_port
+    response_timeout = args.response_timeout
 
     # Define server address
     server_address = (server_ip, port)
@@ -147,7 +165,7 @@ def main():
     print(f"Client socket is using local address {local_address}")
 
     # Set a timeout for the socket to prevent blocking indefinitely
-    client_socket.settimeout(5.0)  # Timeout in seconds
+    client_socket.settimeout(1.0)  # Timeout in seconds
 
     # Start the sending and receiving threads
     sender_thread = threading.Thread(target=send_requests, args=(
@@ -156,11 +174,13 @@ def main():
         num_requests,
         packets_per_request,
         interval_ms,
-        packet_size
+        packet_size,
+        response_timeout
     ))
 
     receiver_thread = threading.Thread(target=receive_responses, args=(
         client_socket,
+        response_timeout
     ))
 
     sender_thread.start()
