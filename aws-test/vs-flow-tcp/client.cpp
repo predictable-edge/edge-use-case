@@ -13,10 +13,12 @@
 #include <map>
 #include <iomanip>
 
-#define DEFAULT_FLOW_SIZE 1400
+// Define the default flow size
+#define DEFAULT_FLOW_SIZE 1000
 
 std::mutex mtx;
 
+// Structure to keep track of sent flows
 struct RequestInfo {
     uint32_t index;
     std::chrono::high_resolution_clock::time_point start_time;
@@ -76,7 +78,8 @@ void send_flows(int client_socket, uint32_t num_requests, uint32_t flow_size, ui
 
         // Calculate elapsed time and adjust sleep accordingly
         auto send_duration = std::chrono::high_resolution_clock::now() - start_time;
-        int64_t remaining_time_ms = interval_ms - std::chrono::duration_cast<std::chrono::milliseconds>(send_duration).count();
+        int64_t elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(send_duration).count();
+        int64_t remaining_time_ms = interval_ms - elapsed_ms;
         if (remaining_time_ms > 0) {
             std::this_thread::sleep_for(std::chrono::milliseconds(remaining_time_ms));
         } else {
