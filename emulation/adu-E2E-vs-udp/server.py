@@ -55,8 +55,6 @@ def server_main(destination_ip, destination_port):
 
             # If all packets are received, send response packets
             if handler.is_complete():
-                print(f"Received all {total_packets} packets for request {request_id}. Sending responses...")
-                
                 # Send the same number of response packets
                 for resp_seq_num in range(1, total_packets + 1):
                     # Create response packet with same format as request
@@ -65,7 +63,6 @@ def server_main(destination_ip, destination_port):
                     send_socket.sendto(payload, (destination_ip, destination_port))
 
                 del requests[key]  # Remove the completed request
-                print(f"Sent all {total_packets} response packets for request {request_id}")
 
         except Exception as e:
             print(f"An error occurred: {e}")

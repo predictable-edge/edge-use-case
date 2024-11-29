@@ -114,64 +114,57 @@ def receive_responses(listen_port, num_requests, num_packets, send_times, lock, 
 
     latency_file_path = os.path.join(result_dir, 'latency.txt')
     response_trackers = {}
+    completed_requests = set()
 
     try:
         with open(latency_file_path, 'w') as f:
             header = f"{'Label':<15}{'Latency':>15}"
             f.write(header + '\n')
 
-            while True:
+            while len(completed_requests) < num_requests:  # 修改退出条件
                 try:
-                    data, addr = recv_socket.recvfrom(1400)  # Match the packet size
+                    data, addr = recv_socket.recvfrom(1400)
                     if len(data) < 12:
                         print(f"Received response too short from {addr}. Ignoring.")
                         continue
 
-                    # Unpack the header from the response
                     request_id, total_packets, seq_num = struct.unpack('!III', data[:12])
 
-                    # Initialize tracker for new requests
                     if request_id not in response_trackers:
                         response_trackers[request_id] = ResponseTracker(total_packets)
 
-                    # Track this packet
                     tracker = response_trackers[request_id]
                     tracker.add_packet(seq_num)
 
-                    # If we've received all packets for this request, calculate latency
                     if tracker.is_complete():
                         with lock:
                             if request_id in send_times:
                                 send_time = send_times[request_id]
-                                latency = (time.time() - send_time) * 1000  # Convert to ms
+                                latency = (time.time() - send_time) * 1000
                                 label = f"{request_id}"
                                 latency_str = f"{latency:.2f} ms"
                                 line = f"{label:<15}{latency_str:>15}"
                                 f.write(line + '\n')
-                                f.flush()  # Ensure writing to file immediately
-                                
-                                # Remove the tracker and send_time after processing
+                                f.flush()
+
+                                completed_requests.add(request_id)
                                 del response_trackers[request_id]
                                 del send_times[request_id]
 
-                                # Log progress
                                 if request_id % 100 == 0 or request_id == 1:
                                     print(f"Completed request {request_id} processing")
-
-                                # Check if we're done with all requests
-                                if len(send_times) == 0:
-                                    print("All responses received and processed.")
-                                    break
+                                    print(f"Processed {len(completed_requests)} out of {num_requests} requests")
 
                 except Exception as e:
                     print(f"An error occurred while receiving responses: {e}")
-                    break
+                    continue  # 继续接收而不是退出
 
     except Exception as e:
         print(f"Failed to write to '{latency_file_path}': {e}")
         return
 
     recv_socket.close()
+    print(f"All {num_requests} requests have been processed.")
     print(f"Latency results saved to {latency_file_path}")
 
 def client_main(args):
@@ -182,7 +175,7 @@ def client_main(args):
     send_times_lock = threading.Lock()
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    result_dir = os.path.join('../result/adu-E2E-od-udp', timestamp)
+    result_dir = os.path.join('../result/adu-E2E-vs-udp', timestamp)  # 修改保存路径
 
     send_thread = threading.Thread(target=send_requests, args=(
         args.server_ip,
