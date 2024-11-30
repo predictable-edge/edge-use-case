@@ -80,7 +80,7 @@ def generate_cdf_plot(latencies, output_path, start_line):
             verticalalignment='top',
             horizontalalignment='right')
    
-    plt.text(p99_value * 1.02, 0.99 * 1.02,
+    plt.text(p99_value * 1.02, 0.99 * 0.9,
             f'P99: {p99_value:.2f} ms',
             verticalalignment='bottom',
             horizontalalignment='right')
