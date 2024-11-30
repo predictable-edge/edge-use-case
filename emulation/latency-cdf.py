@@ -66,13 +66,24 @@ def generate_cdf_plot(latencies, output_path, start_line):
     plt.grid(True, linestyle='--', alpha=0.7)
     
     # Add percentile lines
-    percentiles = [50, 99]
-    for p in percentiles:
+    percentile_values = []
+    for p in [50, 99]:
         percentile_value = np.percentile(sorted_latencies, p)
+        percentile_values.append(percentile_value)
         plt.axhline(p/100, color='red', linestyle='--', alpha=0.7)
         plt.axvline(percentile_value, color='red', linestyle='--', alpha=0.7)
-        plt.text(percentile_value, 0.1, f'{p}th: {percentile_value:.2f} ms', 
-                 verticalalignment='bottom', horizontalalignment='right')
+   
+    p50_value, p99_value = percentile_values
+
+    plt.text(p50_value * 0.95, 0.5 * 0.95,
+            f'P50: {p50_value:.2f} ms',
+            verticalalignment='top',
+            horizontalalignment='right')
+   
+    plt.text(p99_value * 1.02, 0.99 * 1.02,
+            f'P99: {p99_value:.2f} ms',
+            verticalalignment='bottom',
+            horizontalalignment='right')
     
     # Ensure output directory exists
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
