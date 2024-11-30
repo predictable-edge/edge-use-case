@@ -169,7 +169,7 @@ def client_main(args):
     send_times_lock = threading.Lock()
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    result_dir = os.path.join('../result/adu-E2E-vs-tcp', timestamp)
+    result_dir = os.path.join('../result/adu-E2E-od-tcp', timestamp)
 
     send_thread = threading.Thread(target=send_requests, args=(
         args.server_ip,
