@@ -53,7 +53,6 @@ def handle_client_connection(client_socket, client_address, destination_ip, dest
                 break
                 
             request_id, total_bytes = struct.unpack('!II', header_data)
-            print(f"Starting to receive request {request_id} with {total_bytes} bytes")
             
             current_request = RequestHandler(request_id, total_bytes, client_address)
             
@@ -67,8 +66,6 @@ def handle_client_connection(client_socket, client_address, destination_ip, dest
                 
                 current_request.add_bytes(len(data))
                 bytes_remaining -= len(data)
-            
-            print(f"Received complete request {request_id}, sending response...")
 
             # Send a small response packet with just the request_id
             try:
