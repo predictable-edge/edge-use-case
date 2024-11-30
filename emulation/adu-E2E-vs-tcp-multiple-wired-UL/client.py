@@ -30,18 +30,18 @@ def enter_netns(namespace_name):
         print(f"Failed to enter network namespace '{namespace_name}': {e}")
         raise
 
-def send_requests(server_ip, server_port, num_requests, bytes_per_request, interval_ms, send_times, lock):
-    """Function to send TCP requests from host machine.
-    
-    Args:
-        server_ip: IP address of the server
-        server_port: Port number of the server
-        num_requests: Total number of requests to send
-        bytes_per_request: Size of each request in bytes
-        interval_ms: Time interval between requests in milliseconds
-        send_times: Dictionary to store send timestamps
-        lock: Threading lock for synchronization
-    """
+def recv_all(sock, n):
+    """Helper function to receive exact number of bytes."""
+    data = bytearray()
+    while len(data) < n:
+        packet = sock.recv(n - len(data))
+        if not packet:
+            return None
+        data.extend(packet)
+    return bytes(data)
+
+def send_requests(server_ip, server_port, num_requests, bytes_per_request, interval_ms, send_times, lock, multiplier):
+    """Function to send TCP requests from host machine."""
     try:
         # Create and connect TCP socket on host
         send_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -53,52 +53,35 @@ def send_requests(server_ip, server_port, num_requests, bytes_per_request, inter
 
     try:
         for request_id in range(1, num_requests + 1):
-            # Record send time with thread safety
             with lock:
                 send_times[request_id] = time.time()
 
             if request_id % 100 == 0 or request_id == 1:
-                print(f"Sending request {request_id}.")
+                print(f"Sending request {request_id}")
 
             try:
-                # Send header with request_id and total bytes
-                header = struct.pack('!II', request_id, bytes_per_request)
+                # Send header with multiplier
+                header = struct.pack('!III', request_id, bytes_per_request, multiplier)
                 send_socket.sendall(header)
                 
-                # Send data in chunks for better memory management
-                remaining_bytes = bytes_per_request
-                while remaining_bytes > 0:
-                    chunk_size = min(4096, remaining_bytes)
-                    data = b'\0' * chunk_size
-                    send_socket.sendall(data)
-                    remaining_bytes -= chunk_size
+                # Send the data
+                data = b'\0' * bytes_per_request
+                send_socket.sendall(data)
 
             except Exception as e:
                 print(f"Failed to send request {request_id}: {e}")
                 break
 
-            # Wait before sending next request
             if request_id != num_requests:
                 time.sleep(interval_ms / 1000.0)
 
-    except Exception as e:
-        print(f"Error in send loop: {e}")
+        print("Completed sending all requests")
     finally:
         send_socket.close()
-        print("Completed sending all requests.")
 
-def receive_responses(listen_port, num_requests, send_times, lock, result_dir):
-    """Function to receive TCP responses in ue2 namespace and calculate latency.
-    
-    Args:
-        listen_port: Port to listen for responses
-        num_requests: Total number of requests to expect
-        send_times: Dictionary containing request send timestamps
-        lock: Threading lock for synchronization
-        result_dir: Directory to store results
-    """
+def receive_responses(listen_port, num_requests, bytes_per_request, send_times, lock, result_dir):
+    """Function to receive TCP responses in ue2 namespace."""
     try:
-        # Enter ue2 namespace for receiving responses
         enter_netns('ue2')
         print("Entered network namespace: ue2")
     except Exception as e:
@@ -106,7 +89,6 @@ def receive_responses(listen_port, num_requests, send_times, lock, result_dir):
         return
 
     try:
-        # Create and bind receiving socket in ue2 namespace
         recv_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         recv_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         recv_socket.bind(('', listen_port))
@@ -116,7 +98,6 @@ def receive_responses(listen_port, num_requests, send_times, lock, result_dir):
         print(f"Failed to create receiving socket: {e}")
         return
 
-    # Create result directory if it doesn't exist
     try:
         os.makedirs(result_dir, exist_ok=True)
     except Exception as e:
@@ -127,35 +108,36 @@ def receive_responses(listen_port, num_requests, send_times, lock, result_dir):
     completed_requests = set()
 
     try:
-        # Wait for connection from server
-        client_socket, addr = recv_socket.accept()
-        print(f"Accepted connection from {addr}")
+        client_socket, client_address = recv_socket.accept()
+        print(f"Accepted connection from {client_address}")
 
         with open(latency_file_path, 'w') as f:
-            # Write header for latency file
             header = f"{'Label':<15}{'Latency':>15}"
             f.write(header + '\n')
 
             while len(completed_requests) < num_requests:
                 try:
-                    # Receive request_id (4 bytes)
-                    data = client_socket.recv(4)
-                    if not data:
+                    # Receive header
+                    header_data = recv_all(client_socket, 8)
+                    if not header_data:
                         break
 
-                    request_id, = struct.unpack('!I', data)
-                    receive_time = time.time()
+                    request_id, bytes_size = struct.unpack('!II', header_data)
+                    
+                    # Receive complete response data
+                    response_data = recv_all(client_socket, bytes_size)
+                    if not response_data:
+                        break
 
                     # Calculate and record latency
                     with lock:
                         if request_id in send_times:
-                            send_time = send_times[request_id]
-                            latency = (receive_time - send_time) * 1000  # Convert to milliseconds
+                            latency = (time.time() - send_times[request_id]) * 1000
                             label = f"{request_id}"
                             latency_str = f"{latency:.2f} ms"
                             line = f"{label:<15}{latency_str:>15}"
                             f.write(line + '\n')
-                            f.flush()  # Ensure immediate write to file
+                            f.flush()
 
                             completed_requests.add(request_id)
                             del send_times[request_id]
@@ -163,8 +145,6 @@ def receive_responses(listen_port, num_requests, send_times, lock, result_dir):
                             if request_id % 100 == 0 or request_id == 1:
                                 print(f"Completed request {request_id} processing")
                                 print(f"Processed {len(completed_requests)} out of {num_requests} requests")
-                        else:
-                            print(f"Received unknown request_id {request_id}")
 
                 except Exception as e:
                     print(f"Error receiving response: {e}")
@@ -183,19 +163,13 @@ def receive_responses(listen_port, num_requests, send_times, lock, result_dir):
     print(f"Latency results saved to {latency_file_path}")
 
 def client_main(args):
-    """Main function to handle sending and receiving TCP messages.
-    
-    Args:
-        args: Command line arguments
-    """
+    """Main function to handle sending and receiving TCP messages."""
     send_times = {}
     send_times_lock = threading.Lock()
 
-    # Create result directory with timestamp
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    result_dir = os.path.join('../result/adu-E2E-od-tcp-wired-UL', timestamp)
+    result_dir = os.path.join('../result/adu-E2E-vs-tcp-multiple-wired-UL', timestamp)
 
-    # Start sending and receiving threads
     send_thread = threading.Thread(target=send_requests, args=(
         args.server_ip,
         args.server_port,
@@ -203,11 +177,13 @@ def client_main(args):
         args.bytes_per_request,
         args.interval,
         send_times,
-        send_times_lock
+        send_times_lock,
+        args.response_multiplier
     ))
     recv_thread = threading.Thread(target=receive_responses, args=(
         args.listen_port,
         args.num_requests,
+        args.bytes_per_request * args.response_multiplier,
         send_times,
         send_times_lock,
         result_dir
@@ -229,6 +205,7 @@ if __name__ == "__main__":
     parser.add_argument('--num-requests', type=int, required=True, help='Number of requests to send')
     parser.add_argument('--bytes-per-request', type=int, required=True, help='Number of bytes per request')
     parser.add_argument('--interval', type=int, required=True, help='Interval between requests in milliseconds')
+    parser.add_argument('--response-multiplier', type=int, default=1, help='Multiplier for response size (default: 1)')
     args = parser.parse_args()
 
     client_main(args)
