@@ -26,14 +26,11 @@ def handle_client_connection(client_socket, client_address, destination_ip, dest
                 break
                 
             request_id, bytes_size = struct.unpack('!II', header_data)
-            print(f"Receiving request {request_id} with {bytes_size} bytes")
 
             # Read the full request data
             request_data = recv_all(client_socket, bytes_size)
             if not request_data:
                 break
-
-            print(f"Received complete request {request_id}, sending response...")
 
             # Send response with same format and size
             try:
