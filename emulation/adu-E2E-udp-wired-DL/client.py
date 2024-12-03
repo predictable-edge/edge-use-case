@@ -36,7 +36,8 @@ def enter_netns(namespace_name):
 def send_requests(server_ip, server_port, num_requests, bytes_per_request, interval_ms, send_times, lock):
     """Function to send UDP requests from ue1 namespace."""
     if bytes_per_request > MAX_UDP_SIZE:
-        print(f"Warning: Requested size {bytes_per_request} exceeds maximum UDP size. Using {MAX_UDP_SIZE} instead.")
+        print(f"Warning: Requested size {bytes_per_request} exceeds maximum UDP size.")
+        print(f"Using {MAX_UDP_SIZE} bytes instead.")
         bytes_per_request = MAX_UDP_SIZE
 
     try:
@@ -80,19 +81,13 @@ def send_requests(server_ip, server_port, num_requests, bytes_per_request, inter
         print("Completed sending all requests.")
 
 def receive_responses(listen_port, num_requests, send_times, lock, result_dir):
-    """Function to receive UDP responses in ue2 namespace."""
+    """Function to receive UDP responses on host and calculate latency."""
     try:
-        enter_netns('ue2')
-        print("Entered network namespace: ue2")
-    except Exception as e:
-        print(f"Error: {e}")
-        return
-
-    try:
+        # Create UDP socket on host machine
         recv_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         recv_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         recv_socket.bind(('', listen_port))
-        print(f"Listening for responses on port {listen_port} in ue2")
+        print(f"Listening for responses on port {listen_port} on host")
     except Exception as e:
         print(f"Failed to create receiving socket: {e}")
         return
@@ -158,7 +153,7 @@ def client_main(args):
     send_times_lock = threading.Lock()
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    result_dir = os.path.join('../result/adu-E2E-udp-wired-DL', timestamp)
+    result_dir = os.path.join('../result/adu-E2E-od-udp-wired-DL', timestamp)
 
     send_thread = threading.Thread(target=send_requests, args=(
         args.server_ip,

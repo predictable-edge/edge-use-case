@@ -5,43 +5,39 @@ import threading
 
 MAX_UDP_SIZE = 1400  # Maximum UDP payload size
 
-def handle_client_connection(client_address, request_data, destination_ip, destination_port):
-    """Handle a single request"""
-    request_id, = struct.unpack('!I', request_data[:4])
-    print(f"Received request {request_id} from {client_address}")
-
-    # Create UDP socket for response
-    send_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    
+def handle_client_request(server_socket, data, client_address, destination_ip, destination_port):
+    """Handle a single request and send response"""
     try:
+        # Extract request_id from the first 4 bytes
+        request_id, = struct.unpack('!I', data[:4])
+        print(f"Received request {request_id} from {client_address}")
+
         # Send response with request_id
         response = struct.pack('!I', request_id)
-        send_socket.sendto(response, (destination_ip, destination_port))
+        server_socket.sendto(response, (destination_ip, destination_port))
         print(f"Sent response for request {request_id}")
+
     except Exception as e:
-        print(f"Error sending response: {e}")
-    finally:
-        send_socket.close()
+        print(f"Error handling request: {e}")
 
 def server_main(listen_port, dest_ip, dest_port):
     """Main server function"""
-    # Create UDP socket for receiving data
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     
     try:
         server_socket.bind(('', listen_port))
-        print(f"Server listening on port {listen_port} for incoming UDP packets.")
+        print(f"Server listening on port {listen_port} for incoming UDP packets")
 
         while True:
             try:
-                data, client_address = server_socket.recvfrom(MAX_UDP_SIZE + 100)  # Extra space for headers
+                data, client_address = server_socket.recvfrom(MAX_UDP_SIZE + 100)
                 # Start a new thread for handling the response
-                client_thread = threading.Thread(
-                    target=handle_client_connection,
-                    args=(client_address, data, dest_ip, dest_port)
+                thread = threading.Thread(
+                    target=handle_client_request,
+                    args=(server_socket, data, client_address, dest_ip, dest_port)
                 )
-                client_thread.start()
+                thread.start()
             except Exception as e:
                 print(f"Error receiving data: {e}")
 
