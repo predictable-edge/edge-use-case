@@ -46,12 +46,12 @@ def process_all_folders(root_folder, name_mapping=None, skip_rows=650):
     #     }
     if name_mapping is None:
         name_mapping = {
-            'E2E-wo-wireless': 'w/o wireless',
-            'E2E-wo-wireless-w-computing': 'w/o wireless w/ compute contention',
-            'E2E-w-wireless': 'w/ wireless path',
-            'E2E-w-wireless-dl-contention': 'w/ wireless contention',
-            'E2E-w-wireless-computing': 'w/ wireless path  and compute contention',
-            'E2E-w-all-contention': 'w/ wireless and compute contention'
+            'E2E-wo-wireless': 'w/o wireless path and\nw/o compute contention',
+            # 'E2E-wo-wireless-w-computing': 'w/o wireless path and\nw/ compute contention',
+            'E2E-w-wireless': 'w/ wireless path and\nw/o compute contention',
+            # 'E2E-w-wireless-dl-contention': 'w/ wireless contention',
+            # 'E2E-w-wireless-computing': 'w/ wireless path  and compute contention',
+            # 'E2E-w-all-contention': 'w/ wireless and compute contention'
         }
     
     # Define order for display
