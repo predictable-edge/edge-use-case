@@ -8,7 +8,7 @@ import threading
 from datetime import datetime
 
 libc = ctypes.CDLL('libc.so.6', use_errno=True)
-MAX_UDP_SIZE = 1400
+MAX_UDP_SIZE = 1300
 
 def setns(fd, nstype):
     if libc.setns(fd, nstype) != 0:
