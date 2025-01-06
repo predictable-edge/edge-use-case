@@ -53,6 +53,9 @@ def send_requests(server_ip, server_port, num_requests, packets_per_request, int
                     print(f"Send error: {e}")
                     break
 
+            if request_id % 100 == 0 or request_id == 1:
+                print(f"Sending request {request_id}")
+
             if request_id != num_requests:
                 time.sleep(interval_ms / 1000.0)
 
@@ -61,7 +64,7 @@ def send_requests(server_ip, server_port, num_requests, packets_per_request, int
     finally:
         send_socket.close()
         print("Completed sending all requests")
-
+        
 def receive_responses(listen_port, num_requests, send_times, lock, result_dir):
     try:
         recv_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -79,30 +82,63 @@ def receive_responses(listen_port, num_requests, send_times, lock, result_dir):
         return
 
     latency_file_path = os.path.join(result_dir, 'latency.txt')
-    completed_requests = set()
+    completed_requests = {}  # Changed to dict to store latencies
+    written_requests = set()  # Track which requests have been written to file
 
     try:
         with open(latency_file_path, 'w') as f:
             f.write(f"{'Label':<15}{'Latency':>15}\n")
-
+            next_request_to_write = 1  # 追踪下一个要写入的请求ID
+            
+            # Start receive loop
             while len(completed_requests) < num_requests:
                 try:
-                    data, addr = recv_socket.recvfrom(64)
-                    if len(data) < 4:
-                        continue
+                    # Set socket timeout to check for lost packets periodically
+                    recv_socket.settimeout(0.1)
+                    
+                    try:
+                        data, addr = recv_socket.recvfrom(64)
+                        if len(data) < 4:
+                            continue
 
-                    request_id, = struct.unpack('!I', data[:4])
-                    receive_time = time.time()
+                        request_id, = struct.unpack('!I', data[:4])
+                        receive_time = time.time()
 
-                    with lock:
-                        if request_id in send_times:
-                            send_time = send_times[request_id]
-                            latency = (receive_time - send_time) * 1000
-                            f.write(f"{request_id:<15}{latency:.2f} ms\n")
-                            f.flush()
+                        with lock:
+                            if request_id in send_times and request_id not in completed_requests:
+                                send_time = send_times[request_id]
+                                if receive_time - send_time <= 1.0:
+                                    latency = (receive_time - send_time) * 1000
+                                    completed_requests[request_id] = latency
+                                else:
+                                    completed_requests[request_id] = 300.0
+                                del send_times[request_id]
+                                
+                    except socket.timeout:
+                        # Check for lost packets during timeout
+                        current_time = time.time()
+                        with lock:
+                            lost_requests = [req_id for req_id, send_time in send_times.items()
+                                           if current_time - send_time > 1.0 and req_id not in completed_requests]
+                            
+                            for req_id in lost_requests:
+                                completed_requests[req_id] = 300.0
+                                del send_times[req_id]
+                                
+                                if req_id % 100 == 0 or req_id == 1:
+                                    print(f"Request {req_id} marked as lost")
 
-                            completed_requests.add(request_id)
-                            del send_times[request_id]
+                    # 按序写入完成的请求
+                    while next_request_to_write <= num_requests and next_request_to_write in completed_requests:
+                        latency = completed_requests[next_request_to_write]
+                        f.write(f"{next_request_to_write:<15}{latency:.2f} ms\n")
+                        f.flush()
+                        
+                        if next_request_to_write % 100 == 0 or next_request_to_write == 1:
+                            print(f"Completed request {next_request_to_write}")
+                            print(f"Processed {next_request_to_write} out of {num_requests} requests")
+                        
+                        next_request_to_write += 1
 
                 except Exception as e:
                     print(f"Receive error: {e}")
@@ -112,8 +148,16 @@ def receive_responses(listen_port, num_requests, send_times, lock, result_dir):
         print(f"Error in receive loop: {e}")
     finally:
         recv_socket.close()
+        
+        # Write any remaining lost packets
+        with lock:
+            remaining_requests = set(range(1, num_requests + 1)) - set(completed_requests.keys())
+            for req_id in sorted(remaining_requests):
+                completed_requests[req_id] = 300.0
+                f.write(f"{req_id:<15}300.00 ms\n")
+                f.flush()
 
-    print(f"Processed {num_requests} requests")
+    print(f"Processed all {num_requests} requests")
     print(f"Results saved to {latency_file_path}")
 
 def client_main(args):
