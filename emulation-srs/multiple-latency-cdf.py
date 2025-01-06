@@ -51,7 +51,18 @@ def generate_multi_cdf_plot(file_data, output_path, start_line):
         'ytick.labelsize': 24
     })
     
-    colors = ['#1E90FF', '#FF6B6B', '#4CAF50', '#FFA500', '#9370DB']  # 预设一些颜色
+    colors = [
+        '#1E90FF',  # 道奇蓝
+        '#FF6B6B',  # 浅珊瑚红
+        '#4CAF50',  # 绿色
+        '#FFA500',  # 橙色
+        '#9370DB',  # 中紫色
+        '#20B2AA',  # 浅海绿
+        '#FF69B4',  # 热粉红
+        '#FFD700',  # 金色
+        '#8A2BE2',  # 蓝紫色
+        '#00CED1'   # 深青色
+    ]
     
     # Plot each file's CDF
     for idx, (file_path, legend_name) in enumerate(file_data):
@@ -75,18 +86,18 @@ def generate_multi_cdf_plot(file_data, output_path, start_line):
             plt.plot(percentile_value, y_pos, 'o', color=color, markersize=8)
             
             # 添加标注文本
-            if p == 50:
-                plt.text(percentile_value, y_pos,
-                        f' P50={percentile_value:.1f}',
-                        verticalalignment='bottom',
-                        horizontalalignment='left',
-                        color=color)
-            else:
-                plt.text(percentile_value, y_pos,
-                        f' P99={percentile_value:.1f}',
-                        verticalalignment='bottom',
-                        horizontalalignment='left',
-                        color=color)
+            # if p == 50:
+            #     plt.text(percentile_value, y_pos,
+            #             f' P50={percentile_value:.1f}',
+            #             verticalalignment='bottom',
+            #             horizontalalignment='left',
+            #             color=color)
+            # else:
+            #     plt.text(percentile_value, y_pos,
+            #             f' P99={percentile_value:.1f}',
+            #             verticalalignment='bottom',
+            #             horizontalalignment='left',
+            #             color=color)
     
     # Customize plot
     plt.title(f'Latency CDF', fontweight='bold')
