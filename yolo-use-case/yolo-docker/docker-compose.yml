@@ -1,0 +1,14 @@
+services:
+  edge_service:
+    image: yolo-env:latest
+    container_name: yolo_container
+    privileged: true
+    volumes:
+      - /dev/bus/usb:/dev/bus/usb
+      - /dev:/dev
+    network_mode: host
+    cpuset: "0,12,2,14,4,16,6,18,8,20"
+    mem_reservation: 16G
+    mem_limit: 24G 
+    restart: always
+    command: tail -f /dev/null

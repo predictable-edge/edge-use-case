@@ -74,12 +74,10 @@ cleanup_isolation() {
     echo "System restored to original state"
 }
 
-# 初始化变量
 cpu_range=""
 cmd_args=()
 found_separator=0
 
-# 解析参数
 while [[ $# -gt 0 ]]; do
     case $1 in
         -c)

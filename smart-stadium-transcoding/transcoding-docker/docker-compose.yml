@@ -1,0 +1,14 @@
+services:
+  edge_service:
+    image: transcoding-env:latest
+    container_name: transcoding_container
+    privileged: true
+    volumes:
+      - /dev/bus/usb:/dev/bus/usb
+      - /dev:/dev
+    network_mode: host
+    cpuset: "1,3,5,7,9,11,13,15,17,19,21,23"
+    mem_reservation: 16G
+    mem_limit: 24G 
+    restart: always
+    command: tail -f /dev/null
