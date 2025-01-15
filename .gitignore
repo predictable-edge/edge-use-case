@@ -4,4 +4,6 @@ emulation/result
 emulation/figure
 emulation-srs/result
 emulation-srs/figure
+yolo-use-case/video-track/figures
+yolo-use-case/video-track/results
 *.pt
