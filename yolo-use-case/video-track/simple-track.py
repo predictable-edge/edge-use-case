@@ -51,29 +51,21 @@ def generate_cdf_plot(latencies, output_path):
         percentile_value = np.percentile(sorted_latencies, p)
         plt.axhline(p/100, color='red', linestyle='--', alpha=0.7)
         plt.axvline(percentile_value, color='red', linestyle='--', alpha=0.7)
-        
-        # Add percentile labels
-        plt.text(
-            percentile_value * (0.95 if p == 50 else 1.02),
-            p/100 * (0.95 if p == 50 else 0.9),
-            f'P{p}: {percentile_value:.2f} ms',
-            verticalalignment='top' if p == 50 else 'bottom',
-            horizontalalignment='right'
-        )
     
     plt.tight_layout()
     plt.savefig(output_path, dpi=300)
     plt.close()
 
 def track_and_log(
-    model_path="yolo11n.pt",
+    model_path,
     source="https://youtu.be/LNwODJXcvt4",
     conf=0.3,
     iou=0.5,
     show=True,
     device='cpu',
     start_line=50,
-    output_name=None
+    output_name=None,
+    imgsz=1280
 ):
     """
     Perform object tracking using YOLO model and log inference times.
@@ -87,6 +79,7 @@ def track_and_log(
         device (str): Computation device ('cpu' or 'cuda')
         start_line (int): Starting line for CDF analysis
         output_name (str): Custom output file name (optional)
+        imgsz (int): Input image size
     """
     # Create results and figures directories
     ensure_dir('results')
@@ -119,7 +112,8 @@ def track_and_log(
             iou=iou,
             show=show,
             device=device,
-            stream=True
+            stream=True,
+            imgsz=imgsz 
         )
         
         for frame_idx, result in enumerate(results_generator):
@@ -160,6 +154,12 @@ def parse_args():
                       help='Computation device to use')
     parser.add_argument('--start-line', type=int, default=50,
                       help='Starting line for CDF analysis')
+    parser.add_argument('--imgsz', type=int, default=1280,
+                      help='Input image size')
+    parser.add_argument('--model-type', type=str, 
+                      choices=['n', 's', 'm', 'l', 'x'],
+                      default='x',
+                      help='YOLOv8 model type (n:nano, s:small, m:medium, l:large, x:xlarge)')
     
     return parser.parse_args()
 
@@ -173,16 +173,20 @@ def main():
     # Convert 'gpu' to 'cuda' for YOLO compatibility
     device = 'cuda' if args.device == 'gpu' else 'cpu'
     
+    # Create model path based on model type
+    model_path = f"yolov8{args.model_type}.pt"
+    
     # Execute tracking and logging
     track_and_log(
-        model_path="yolo11n.pt",
+        model_path=model_path,
         source="https://youtu.be/LNwODJXcvt4",
         conf=0.3,
         iou=0.5,
         show=True,
         device=device,
         start_line=args.start_line,
-        output_name=args.output
+        output_name=args.output,
+        imgsz=args.imgsz 
     )
 
 if __name__ == "__main__":
