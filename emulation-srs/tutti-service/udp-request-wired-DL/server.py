@@ -27,35 +27,39 @@ class UETracker:
         
         self.last_request_time = time.time()
         self.request_count = 0
+        self.current_request = None  # Track current request being processed
     
     def _register_ue(self):
         """Register UE with the controller"""
         msg = f"NEW_UE|{self.rnti}|20|1024"  # Latency and size requirements
         self.controller_socket.send(msg.encode('utf-8'))
     
-    def notify_request(self, seq_num):
+    def notify_request(self, request_id, seq_num):
         """Notify controller of new request"""
-        current_time = time.time()
-        self.request_count += 1
-        
-        # Only send updates to controller periodically to avoid overwhelming it
-        if current_time - self.last_request_time >= 0.1:  # 100ms minimum interval
-            msg = f"REQUEST|{self.rnti}|{seq_num}"
-            try:
-                self.controller_socket.send(msg.encode('utf-8'))
-                self.last_request_time = current_time
-                self.request_count = 0
-            except Exception as e:
-                print(f"Failed to notify controller: {e}")
+        # Only notify on the first packet of each request
+        if seq_num == 0:
+            current_time = time.time()
+            if current_time - self.last_request_time >= 0.1:  # 100ms minimum interval
+                msg = f"REQUEST|{self.rnti}|{request_id}"
+                try:
+                    self.controller_socket.send(msg.encode('utf-8'))
+                    self.last_request_time = current_time
+                except Exception as e:
+                    print(f"Failed to notify controller: {e}")
     
     def add_packet(self, request_id, seq_num, total_packets):
         with self.lock:
+            # If this is a new request, store it
+            if self.current_request != request_id:
+                self.current_request = request_id
+            
             self.packets[request_id]['total'] = total_packets
             self.packets[request_id]['received'].add(seq_num)
             is_complete = len(self.packets[request_id]['received']) == total_packets
             
             if is_complete:
                 del self.packets[request_id]
+                self.current_request = None
             
             return is_complete
 
@@ -108,13 +112,14 @@ class Server:
                 )
             
             tracker = self.ue_trackers[client_key]
-            tracker.notify_request(seq_num)
+            tracker.notify_request(request_id, seq_num)  # Pass both request_id and seq_num
             
             # Process packet
             if tracker.add_packet(request_id, seq_num, total_packets):
                 # Send response when all packets received
                 response = struct.pack('!II', request_id, tracker.rnti)
                 self.socket.sendto(response, (response_ip, response_port))
+                print(f"Completed request {request_id} from RNTI {rnti} ({total_packets} packets)")
                 
         except Exception as e:
             print(f"Error handling request: {e}")

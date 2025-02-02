@@ -69,7 +69,7 @@ class UEClient:
             'namespace': str,
             'listen_port': int,
             'num_requests': int,
-            'request_size': int,
+            'request_size': int,  # number of packets per request
             'interval': int
         }
         """
@@ -78,14 +78,13 @@ class UEClient:
         self.server_ip = server_ip
         self.server_port = server_port
         self.listen_port = config['listen_port']
-        self.request_size = config['request_size']
+        self.packets_per_request = config['request_size']  # number of packets in each request
         self.num_requests = config['num_requests']
         self.interval = config['interval']
         
-        # Calculate packets needed for request size
+        # Header size and payload size
         header_size = 16  # 4 ints: request_id, seq_num, total_packets, rnti
         self.payload_size = MAX_UDP_SIZE - header_size
-        self.packets_per_request = (self.request_size + self.payload_size - 1) // self.payload_size
         
         self.send_times = {}
         self.lock = threading.Lock()
@@ -98,6 +97,7 @@ class UEClient:
             print(f"Error creating socket for UE {self.rnti}: {e}")
             return
 
+        # Create payload of maximum allowed size
         payload = b'\0' * self.payload_size
 
         try:
@@ -105,6 +105,7 @@ class UEClient:
                 with self.lock:
                     self.send_times[request_id] = time.time()
 
+                # Send all packets for this request
                 for seq_num in range(self.packets_per_request):
                     header = struct.pack('!IIII', 
                                        request_id, seq_num, 
@@ -114,7 +115,7 @@ class UEClient:
                     send_socket.sendto(data, (self.server_ip, self.server_port))
 
                 if request_id % 100 == 0:
-                    print(f"UE {self.rnti}: Sent request {request_id}")
+                    print(f"UE {self.rnti}: Sent request {request_id} ({self.packets_per_request} packets)")
 
                 if request_id != self.num_requests:
                     time.sleep(self.interval / 1000.0)
