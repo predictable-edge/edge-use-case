@@ -19,22 +19,28 @@ class UETracker:
         self.controller_ip = controller_ip
         self.controller_port = controller_port
         self.controller_socket = None
+        self.registered = False  # Track if UE is registered with controller
         self.connect_to_controller()
         
         self.last_request_time = time.time()
         self.request_count = 0
         self.current_request = None
+        self.registration_time = None  # Track when UE was registered
+        self.registration_wait = 0.5  # Wait 500ms after registration
     
     def connect_to_controller(self):
         """Connect to the controller and register"""
+        if self.controller_socket is not None:
+            return  # Already connected
+
         try:
-            if self.controller_socket:
-                self.controller_socket.close()
-            
             self.controller_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.controller_socket.connect((self.controller_ip, self.controller_port))
             self.controller_socket.send(b"tutti_server")
-            self._register_ue()
+            if not self.registered:
+                self._register_ue()
+                self.registered = True
+                self.registration_time = time.time()  # Record registration time
         except Exception as e:
             print(f"Failed to connect to controller: {e}")
             if self.controller_socket:
@@ -43,20 +49,29 @@ class UETracker:
 
     def _register_ue(self):
         """Register UE with the controller"""
+        if not self.controller_socket:
+            return
+            
         # Format: NEW_UE|rnti|ue_idx|latency|size
         msg = f"NEW_UE|{self.rnti}|0|{self.latency_req}|{self.request_size}"
         try:
             self.controller_socket.send(msg.encode('utf-8'))
         except Exception as e:
             print(f"Failed to register UE: {e}")
-    
+            self.controller_socket.close()
+            self.controller_socket = None
+            self.registered = False
+
     def notify_request(self, request_id, seq_num):
         """Notify controller of new request"""
-        if not self.controller_socket:
-            try:
-                self.connect_to_controller()
-            except:
+        if not self.controller_socket and not self.registered:
+            self.connect_to_controller()
+            if not self.controller_socket:
                 return
+
+        # Wait for registration to be processed by controller
+        if self.registration_time and time.time() - self.registration_time < self.registration_wait:
+            return
 
         if seq_num == 0:
             current_time = time.time()
@@ -67,8 +82,12 @@ class UETracker:
                     self.last_request_time = current_time
                 except Exception as e:
                     print(f"Failed to notify controller: {e}")
-                    self.controller_socket = None  # Mark for reconnection
-    
+                    if self.controller_socket:
+                        self.controller_socket.close()
+                    self.controller_socket = None
+                    self.registered = False
+                    self.registration_time = None
+
     def add_packet(self, request_id, seq_num, total_packets):
         with self.lock:
             # If this is a new request, store it
@@ -85,6 +104,16 @@ class UETracker:
             
             return is_complete
 
+    def cleanup(self):
+        """Clean up resources"""
+        if self.controller_socket:
+            try:
+                self.controller_socket.close()
+            except:
+                pass
+            self.controller_socket = None
+            self.registered = False
+
 class Server:
     def __init__(self, listen_port, response_ip, controller_ip, controller_port):
         self.listen_port = listen_port
@@ -96,9 +125,11 @@ class Server:
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         
+        self.registered_rntis = set()  # Track which RNTIs have been registered
         self.ue_trackers = {}
         self.active_ues = set()
         self.ue_last_active = {}
+        self.tracker_lock = threading.Lock()  # Add lock for thread safety
         self.cleanup_thread = threading.Thread(target=self._cleanup_inactive_ues, daemon=True)
         self.cleanup_thread.start()
     
@@ -108,13 +139,14 @@ class Server:
             current_time = time.time()
             inactive_threshold = 10.0  # 10 seconds of inactivity
             
-            with threading.Lock():
+            with self.tracker_lock:
                 for client_key in list(self.ue_trackers.keys()):
                     if current_time - self.ue_last_active.get(client_key, 0) > inactive_threshold:
                         print(f"Removing inactive UE tracker for {client_key}")
                         tracker = self.ue_trackers.pop(client_key)
-                        tracker.controller_socket.close()
+                        tracker.cleanup()  # Use the cleanup method
                         self.ue_last_active.pop(client_key)
+                        # Don't remove from registered_rntis to prevent re-registration
             
             time.sleep(5)  # Check every 5 seconds
     
@@ -132,19 +164,33 @@ class Server:
             request_size = total_packets * payload_size
             
             # Get or create UE tracker
-            if client_key not in self.ue_trackers:
-                print(f"New UE connected - RNTI: {rnti}, Response Port: {response_port}, Latency Req: {latency_req}ms")
-                self.ue_trackers[client_key] = UETracker(
-                    rnti=rnti,
-                    client_port=response_port,
-                    latency_req=latency_req,  # Use latency requirement from client
-                    request_size=request_size,
-                    controller_ip=self.controller_ip,
-                    controller_port=self.controller_port
-                )
+            with self.tracker_lock:
+                if client_key not in self.ue_trackers:
+                    print(f"New UE connected - RNTI: {rnti}, Response Port: {response_port}, Latency Req: {latency_req}ms")
+                    tracker = UETracker(
+                        rnti=rnti,
+                        client_port=response_port,
+                        latency_req=latency_req,
+                        request_size=request_size,
+                        controller_ip=self.controller_ip,
+                        controller_port=self.controller_port
+                    )
+                    
+                    # Only register if this RNTI hasn't been registered before
+                    if rnti not in self.registered_rntis:
+                        tracker.connect_to_controller()
+                        if tracker.registered:
+                            self.registered_rntis.add(rnti)
+                    else:
+                        tracker.registered = True  # Mark as registered without connecting
+                    
+                    self.ue_trackers[client_key] = tracker
+                
+                tracker = self.ue_trackers[client_key]
             
-            tracker = self.ue_trackers[client_key]
-            tracker.notify_request(request_id, seq_num)
+            # Only notify if already registered (avoid registration attempts)
+            if tracker.registered:
+                tracker.notify_request(request_id, seq_num)
             
             # Process packet
             if tracker.add_packet(request_id, seq_num, total_packets):

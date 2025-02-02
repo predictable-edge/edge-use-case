@@ -90,24 +90,39 @@ class UEClient:
         
         self.send_times = {}
         self.lock = threading.Lock()
+        self.registration_complete = threading.Event()
+        self.registration_timeout = 5.0  # 5 seconds timeout for registration
 
     def send_requests(self):
+        """Send requests after ensuring registration is complete"""
         try:
+            # Send a single packet to trigger registration
             enter_netns(self.namespace)
             send_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        except Exception as e:
-            print(f"Error creating socket for UE {self.rnti}: {e}")
-            return
-
-        # Create payload of maximum allowed size
-        payload = b'\0' * self.payload_size
-
-        try:
+            
+            # Send registration packet (request_id = 0)
+            header = struct.pack('!IIIIII', 
+                               0, 0,  # request_id = 0, seq_num = 0
+                               1,     # total_packets = 1
+                               self.rnti,
+                               self.listen_port,
+                               self.latency_req)
+            data = header + b'\0' * self.payload_size
+            send_socket.sendto(data, (self.server_ip, self.server_port))
+            
+            # Wait for registration to complete
+            print(f"UE {self.rnti}: Waiting for registration...")
+            if not self.registration_complete.wait(self.registration_timeout):
+                print(f"UE {self.rnti}: Registration timeout")
+                return
+            
+            print(f"UE {self.rnti}: Registration complete, starting requests")
+            
+            # Start normal request sending
             for request_id in range(1, self.num_requests + 1):
                 with self.lock:
                     self.send_times[request_id] = time.time()
 
-                # Send all packets for this request
                 for seq_num in range(self.packets_per_request):
                     header = struct.pack('!IIIIII', 
                                        request_id, seq_num, 
@@ -115,7 +130,7 @@ class UEClient:
                                        self.rnti,
                                        self.listen_port,
                                        self.latency_req)
-                    data = header + payload
+                    data = header + b'\0' * self.payload_size
                     send_socket.sendto(data, (self.server_ip, self.server_port))
 
                 if request_id % 100 == 0:
@@ -133,7 +148,7 @@ class UEClient:
         try:
             recv_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             recv_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            recv_socket.bind(('', self.listen_port))  # Bind to all interfaces
+            recv_socket.bind(('', self.listen_port))
         except Exception as e:
             print(f"Socket error for UE {self.rnti}: {e}")
             return
@@ -149,28 +164,23 @@ class UEClient:
 
                 while len(completed_requests) < self.num_requests:
                     try:
-                        recv_socket.settimeout(0.1)
-                        try:
-                            data, _ = recv_socket.recvfrom(64)
-                            request_id, recv_rnti = struct.unpack('!II', data[:8])
-                            
-                            if recv_rnti != self.rnti:
-                                continue
+                        data, _ = recv_socket.recvfrom(64)
+                        request_id, recv_rnti = struct.unpack('!II', data[:8])
+                        
+                        if recv_rnti != self.rnti:
+                            continue
 
-                            receive_time = time.time()
-                            with self.lock:
-                                if request_id in self.send_times:
-                                    latency = (receive_time - self.send_times[request_id]) * 1000
-                                    completed_requests[request_id] = min(latency, 300.0)
-                                    del self.send_times[request_id]
+                        # Mark registration as complete when receiving response to request_id 0
+                        if request_id == 0:
+                            self.registration_complete.set()
+                            continue
 
-                        except socket.timeout:
-                            current_time = time.time()
-                            with self.lock:
-                                for req_id, send_time in list(self.send_times.items()):
-                                    if current_time - send_time > 1.0:
-                                        completed_requests[req_id] = 300.0
-                                        del self.send_times[req_id]
+                        receive_time = time.time()
+                        with self.lock:
+                            if request_id in self.send_times:
+                                latency = (receive_time - self.send_times[request_id]) * 1000
+                                completed_requests[request_id] = min(latency, 300.0)
+                                del self.send_times[request_id]
 
                         while next_request <= self.num_requests and next_request in completed_requests:
                             latency = completed_requests[next_request]
@@ -206,27 +216,33 @@ class MultiUEClient:
                 server_port=server_port
             )
             self.clients.append(client)
-    
+        
+        # Add registration delay between clients
+        self.registration_delay = 1.0  # 1 second between client starts
+
     def run(self):
-        """Run all UE clients concurrently"""
+        """Run all UE clients with staggered start"""
         send_threads = []
         recv_threads = []
         
-        # Start all send and receive threads
+        # Start receive threads first
         for client in self.clients:
-            send_thread = threading.Thread(
-                target=client.send_requests
-            )
             recv_thread = threading.Thread(
                 target=client.receive_responses,
                 args=(self.result_dir,)
             )
-            
-            send_threads.append(send_thread)
             recv_threads.append(recv_thread)
-            
-            send_thread.start()
             recv_thread.start()
+            time.sleep(0.1)  # Small delay between receive thread starts
+        
+        # Start send threads with delay between each client
+        for client in self.clients:
+            send_thread = threading.Thread(
+                target=client.send_requests
+            )
+            send_threads.append(send_thread)
+            send_thread.start()
+            time.sleep(self.registration_delay)  # Wait between client starts
         
         # Wait for all threads to complete
         for send_thread, recv_thread in zip(send_threads, recv_threads):
