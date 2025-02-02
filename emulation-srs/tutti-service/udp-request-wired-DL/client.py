@@ -217,8 +217,8 @@ class MultiUEClient:
             )
             self.clients.append(client)
         
-        # Add registration delay between clients
-        self.registration_delay = 1.0  # 1 second between client starts
+        # Increase registration delay between clients
+        self.registration_delay = 3.0  # 3 seconds between client starts
 
     def run(self):
         """Run all UE clients with staggered start"""
@@ -233,7 +233,7 @@ class MultiUEClient:
             )
             recv_threads.append(recv_thread)
             recv_thread.start()
-            time.sleep(0.1)  # Small delay between receive thread starts
+            time.sleep(0.5)  # Longer delay between receive thread starts
         
         # Start send threads with delay between each client
         for client in self.clients:

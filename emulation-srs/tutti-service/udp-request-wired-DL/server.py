@@ -26,7 +26,7 @@ class UETracker:
         self.request_count = 0
         self.current_request = None
         self.registration_time = None  # Track when UE was registered
-        self.registration_wait = 0.5  # Wait 500ms after registration
+        self.registration_wait = 2.0  # Wait 2 seconds after registration
     
     def connect_to_controller(self):
         """Connect to the controller and register"""
@@ -56,6 +56,7 @@ class UETracker:
         msg = f"NEW_UE|{self.rnti}|0|{self.latency_req}|{self.request_size}"
         try:
             self.controller_socket.send(msg.encode('utf-8'))
+            time.sleep(self.registration_wait)  # Wait for controller to process
         except Exception as e:
             print(f"Failed to register UE: {e}")
             self.controller_socket.close()
@@ -163,38 +164,48 @@ class Server:
             payload_size = MAX_UDP_SIZE - 24  # Header size is 24 bytes
             request_size = total_packets * payload_size
             
-            # Get or create UE tracker
+            # Handle registration packet (request_id = 0)
+            if request_id == 0:
+                with self.tracker_lock:
+                    if client_key not in self.ue_trackers:
+                        print(f"Registering new UE - RNTI: {rnti}, Response Port: {response_port}, Latency Req: {latency_req}ms")
+                        tracker = UETracker(
+                            rnti=rnti,
+                            client_port=response_port,
+                            latency_req=latency_req,
+                            request_size=request_size,
+                            controller_ip=self.controller_ip,
+                            controller_port=self.controller_port
+                        )
+                        
+                        if rnti not in self.registered_rntis:
+                            tracker.connect_to_controller()
+                            if tracker.registered:
+                                self.registered_rntis.add(rnti)
+                        else:
+                            tracker.registered = True
+                        
+                        self.ue_trackers[client_key] = tracker
+                    
+                    # Send registration acknowledgment
+                    response = struct.pack('!II', 0, rnti)
+                    self.socket.sendto(response, (self.response_ip, response_port))
+                    return
+            
+            # Handle normal requests
             with self.tracker_lock:
                 if client_key not in self.ue_trackers:
-                    print(f"New UE connected - RNTI: {rnti}, Response Port: {response_port}, Latency Req: {latency_req}ms")
-                    tracker = UETracker(
-                        rnti=rnti,
-                        client_port=response_port,
-                        latency_req=latency_req,
-                        request_size=request_size,
-                        controller_ip=self.controller_ip,
-                        controller_port=self.controller_port
-                    )
-                    
-                    # Only register if this RNTI hasn't been registered before
-                    if rnti not in self.registered_rntis:
-                        tracker.connect_to_controller()
-                        if tracker.registered:
-                            self.registered_rntis.add(rnti)
-                    else:
-                        tracker.registered = True  # Mark as registered without connecting
-                    
-                    self.ue_trackers[client_key] = tracker
+                    print(f"Received request from unregistered UE - RNTI: {rnti}")
+                    return
                 
                 tracker = self.ue_trackers[client_key]
             
-            # Only notify if already registered (avoid registration attempts)
+            # Only notify if already registered
             if tracker.registered:
                 tracker.notify_request(request_id, seq_num)
             
             # Process packet
             if tracker.add_packet(request_id, seq_num, total_packets):
-                # Send response when all packets received
                 response = struct.pack('!II', request_id, tracker.rnti)
                 self.socket.sendto(response, (self.response_ip, tracker.client_port))
                 print(f"Completed request {request_id} from RNTI {rnti} ({total_packets} packets)")
