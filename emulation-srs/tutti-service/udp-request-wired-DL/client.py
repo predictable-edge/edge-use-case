@@ -78,7 +78,7 @@ class UEClient:
         self.server_ip = server_ip
         self.server_port = server_port
         self.listen_port = config['listen_port']
-        self.packets_per_request = config['request_size']  # number of packets in each request
+        self.packets_per_request = config['request_size']
         self.num_requests = config['num_requests']
         self.interval = config['interval']
         
@@ -130,7 +130,7 @@ class UEClient:
         try:
             recv_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             recv_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            recv_socket.bind(('', self.listen_port))
+            recv_socket.bind(('', self.listen_port))  # Bind to all interfaces
         except Exception as e:
             print(f"Socket error for UE {self.rnti}: {e}")
             return
