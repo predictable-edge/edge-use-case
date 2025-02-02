@@ -83,7 +83,7 @@ class UEClient:
         self.interval = config['interval']
         
         # Header size and payload size
-        header_size = 16  # 4 ints: request_id, seq_num, total_packets, rnti
+        header_size = 20  # 5 ints: request_id, seq_num, total_packets, rnti, listen_port
         self.payload_size = MAX_UDP_SIZE - header_size
         
         self.send_times = {}
@@ -107,10 +107,11 @@ class UEClient:
 
                 # Send all packets for this request
                 for seq_num in range(self.packets_per_request):
-                    header = struct.pack('!IIII', 
+                    header = struct.pack('!IIIII', 
                                        request_id, seq_num, 
                                        self.packets_per_request,
-                                       self.rnti)
+                                       self.rnti,
+                                       self.listen_port)
                     data = header + payload
                     send_socket.sendto(data, (self.server_ip, self.server_port))
 
