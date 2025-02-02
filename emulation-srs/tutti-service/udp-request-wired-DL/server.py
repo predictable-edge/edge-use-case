@@ -120,24 +120,24 @@ class Server:
     
     def handle_request(self, data, client_address):
         try:
-            # Unpack header: request_id, seq_num, total_packets, rnti, response_port
-            header = struct.unpack('!IIIII', data[:20])
-            request_id, seq_num, total_packets, rnti, response_port = header
+            # Unpack header: request_id, seq_num, total_packets, rnti, response_port, latency_req
+            header = struct.unpack('!IIIIII', data[:24])
+            request_id, seq_num, total_packets, rnti, response_port, latency_req = header
             
             client_key = (client_address[0], client_address[1])
             self.ue_last_active[client_key] = time.time()
             
             # Calculate total request size based on number of packets
-            payload_size = MAX_UDP_SIZE - 20  # Header size is 20 bytes
+            payload_size = MAX_UDP_SIZE - 24  # Header size is 24 bytes
             request_size = total_packets * payload_size
             
             # Get or create UE tracker
             if client_key not in self.ue_trackers:
-                print(f"New UE connected - RNTI: {rnti}, Response Port: {response_port}")
+                print(f"New UE connected - RNTI: {rnti}, Response Port: {response_port}, Latency Req: {latency_req}ms")
                 self.ue_trackers[client_key] = UETracker(
                     rnti=rnti,
                     client_port=response_port,
-                    latency_req=100,  # This should come from client config
+                    latency_req=latency_req,  # Use latency requirement from client
                     request_size=request_size,
                     controller_ip=self.controller_ip,
                     controller_port=self.controller_port

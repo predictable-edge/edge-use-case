@@ -85,7 +85,7 @@ class UEClient:
         self.latency_req = config.get('latency_req', 100)  # Default to 20ms if not specified
         
         # Header size and payload size
-        header_size = 20  # 5 ints: request_id, seq_num, total_packets, rnti, listen_port
+        header_size = 24  # 6 ints: request_id, seq_num, total_packets, rnti, listen_port, latency_req
         self.payload_size = MAX_UDP_SIZE - header_size
         
         self.send_times = {}
@@ -109,11 +109,12 @@ class UEClient:
 
                 # Send all packets for this request
                 for seq_num in range(self.packets_per_request):
-                    header = struct.pack('!IIIII', 
+                    header = struct.pack('!IIIIII', 
                                        request_id, seq_num, 
                                        self.packets_per_request,
                                        self.rnti,
-                                       self.listen_port)
+                                       self.listen_port,
+                                       self.latency_req)
                     data = header + payload
                     send_socket.sendto(data, (self.server_ip, self.server_port))
 
