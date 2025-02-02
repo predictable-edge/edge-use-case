@@ -70,7 +70,8 @@ class UEClient:
             'listen_port': int,
             'num_requests': int,
             'request_size': int,  # number of packets per request
-            'interval': int
+            'interval': int,
+            'latency_req': int    # latency requirement in ms
         }
         """
         self.rnti = config['rnti']
@@ -81,6 +82,7 @@ class UEClient:
         self.packets_per_request = config['request_size']
         self.num_requests = config['num_requests']
         self.interval = config['interval']
+        self.latency_req = config.get('latency_req', 100)  # Default to 20ms if not specified
         
         # Header size and payload size
         header_size = 20  # 5 ints: request_id, seq_num, total_packets, rnti, listen_port

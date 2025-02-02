@@ -8,45 +8,66 @@ import time
 MAX_UDP_SIZE = 1400
 
 class UETracker:
-    def __init__(self, rnti, client_port, controller_ip, controller_port):
+    def __init__(self, rnti, client_port, latency_req, request_size, controller_ip, controller_port):
         self.rnti = rnti
         self.client_port = client_port
+        self.latency_req = latency_req  # Latency requirement in ms
+        self.request_size = request_size  # Total request size in bytes
         self.packets = defaultdict(lambda: {'total': 0, 'received': set()})
         self.lock = threading.Lock()
         
-        # Connect to tutti controller
-        self.controller_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        try:
-            self.controller_socket.connect((controller_ip, controller_port))
-            # Register as an application
-            self.controller_socket.send(b"tutti_server")
-            # Register this UE
-            self._register_ue()
-        except Exception as e:
-            print(f"Failed to connect to controller: {e}")
-            self.controller_socket.close()
+        self.controller_ip = controller_ip
+        self.controller_port = controller_port
+        self.controller_socket = None
+        self.connect_to_controller()
         
         self.last_request_time = time.time()
         self.request_count = 0
         self.current_request = None
     
+    def connect_to_controller(self):
+        """Connect to the controller and register"""
+        try:
+            if self.controller_socket:
+                self.controller_socket.close()
+            
+            self.controller_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.controller_socket.connect((self.controller_ip, self.controller_port))
+            self.controller_socket.send(b"tutti_server")
+            self._register_ue()
+        except Exception as e:
+            print(f"Failed to connect to controller: {e}")
+            if self.controller_socket:
+                self.controller_socket.close()
+            self.controller_socket = None
+
     def _register_ue(self):
         """Register UE with the controller"""
-        msg = f"NEW_UE|{self.rnti}|20|1024"  # Latency and size requirements
-        self.controller_socket.send(msg.encode('utf-8'))
+        # Format: NEW_UE|rnti|ue_idx|latency|size
+        msg = f"NEW_UE|{self.rnti}|0|{self.latency_req}|{self.request_size}"
+        try:
+            self.controller_socket.send(msg.encode('utf-8'))
+        except Exception as e:
+            print(f"Failed to register UE: {e}")
     
     def notify_request(self, request_id, seq_num):
         """Notify controller of new request"""
-        # Only notify on the first packet of each request
+        if not self.controller_socket:
+            try:
+                self.connect_to_controller()
+            except:
+                return
+
         if seq_num == 0:
             current_time = time.time()
-            if current_time - self.last_request_time >= 0.1:  # 100ms minimum interval
+            if current_time - self.last_request_time >= 0.1:
                 msg = f"REQUEST|{self.rnti}|{request_id}"
                 try:
                     self.controller_socket.send(msg.encode('utf-8'))
                     self.last_request_time = current_time
                 except Exception as e:
                     print(f"Failed to notify controller: {e}")
+                    self.controller_socket = None  # Mark for reconnection
     
     def add_packet(self, request_id, seq_num, total_packets):
         with self.lock:
@@ -106,12 +127,18 @@ class Server:
             client_key = (client_address[0], client_address[1])
             self.ue_last_active[client_key] = time.time()
             
+            # Calculate total request size based on number of packets
+            payload_size = MAX_UDP_SIZE - 20  # Header size is 20 bytes
+            request_size = total_packets * payload_size
+            
             # Get or create UE tracker
             if client_key not in self.ue_trackers:
                 print(f"New UE connected - RNTI: {rnti}, Response Port: {response_port}")
                 self.ue_trackers[client_key] = UETracker(
                     rnti=rnti,
                     client_port=response_port,
+                    latency_req=100,  # This should come from client config
+                    request_size=request_size,
                     controller_ip=self.controller_ip,
                     controller_port=self.controller_port
                 )
