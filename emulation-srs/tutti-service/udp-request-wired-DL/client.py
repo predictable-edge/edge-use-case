@@ -6,6 +6,7 @@ import os
 import json
 import ctypes
 import threading
+import subprocess
 from datetime import datetime
 
 libc = ctypes.CDLL('libc.so.6', use_errno=True)
@@ -89,7 +90,8 @@ def trigger_rrc_connection(namespace):
         bool: True if ping was successful, False otherwise
     """
     try:
-        cmd = f"ip netns exec {namespace} ping -s 32 -c 1 192.168.2.2"
+        cmd = f"ip netns exec {namespace} ping -c 1 192.168.2.2"
+        print(cmd)
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
         
         if result.returncode == 0:
@@ -138,22 +140,24 @@ class UEClient:
         self.lock = threading.Lock()
         self.registration_complete = threading.Event()
         self.registration_timeout = 5.0  # 5 seconds timeout for registration
+        
+        # Initialize RNTI at startup
+        self.initialize_connection()
+
+    def initialize_connection(self):
+        """Initialize RRC connection and get initial RNTI"""
+        # First try to trigger RRC connection
+        trigger_rrc_connection(self.namespace)
+        
+        # Get initial RNTI
+        self.rnti = get_ue_rnti(self.ue_id)
+        if self.rnti is None:
+            raise Exception(f"Could not get initial RNTI for UE {self.ue_id}")
+        print(f"Successfully initialized UE {self.ue_id} with RNTI {self.rnti}")
 
     def update_rnti(self):
         """Update RNTI value from real-time UE status"""
-        # First try to trigger RRC connection if needed
-        trigger_rrc_connection(self.namespace)
-        
-        # Get current RNTI
-        new_rnti = get_ue_rnti(self.ue_id)
-        if new_rnti is None:
-            if self.rnti is None:
-                raise Exception(f"Could not get RNTI for UE {self.ue_id}")
-            print(f"Warning: Could not update RNTI, using previous value {self.rnti}")
-        else:
-            if self.rnti != new_rnti:
-                print(f"RNTI updated for UE {self.ue_id}: {self.rnti} -> {new_rnti}")
-            self.rnti = new_rnti
+        # Just return the stored RNTI - no need to check repeatedly
         return self.rnti
 
     def send_requests(self):
@@ -162,11 +166,6 @@ class UEClient:
             # Enter namespace and create socket
             enter_netns(self.namespace)
             send_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            
-            # Get initial RNTI
-            if not self.update_rnti():
-                print(f"Failed to get initial RNTI for UE {self.ue_id}")
-                return
             
             # Send registration packet (request_id = 0)
             header = struct.pack('!IIIIII', 
@@ -188,11 +187,6 @@ class UEClient:
             
             # Start normal request sending
             for request_id in range(1, self.num_requests + 1):
-                # Update RNTI before each request
-                if not self.update_rnti():
-                    print(f"Failed to update RNTI for request {request_id}")
-                    continue
-
                 with self.lock:
                     self.send_times[request_id] = time.time()
 
