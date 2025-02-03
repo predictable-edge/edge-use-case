@@ -219,13 +219,9 @@ class UEClient:
             send_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             send_socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024*1024*4)
             
-            # Start buffer processing thread
-            buffer_thread = threading.Thread(target=self._process_buffer, args=(send_socket,))
-            buffer_thread.daemon = True
-            buffer_thread.start()
-            
             try:
                 # Send registration packet
+                print(f"UE {self.rnti}: Sending registration packet...")
                 header = struct.pack('!IIII4sI', 
                                    0, 0,
                                    self.packets_per_request,
@@ -233,21 +229,19 @@ class UEClient:
                                    self.rnti.encode().ljust(4),
                                    self.latency_req)
                 data = header + b'\0' * self.payload_size
-                self.request_buffer.put((data, 0), timeout=1.0)
+                send_socket.sendto(data, (self.server_ip, self.server_port))
                 
-                # Wait for registration
+                print(f"UE {self.rnti}: Waiting for registration confirmation...")
                 if not self.registration_complete.wait(self.registration_timeout):
                     print(f"UE {self.rnti}: Registration timeout")
                     return
                 
-                print(f"UE {self.rnti}: Registration complete, waiting for start signal")
-                
-                # Wait for start signal from MultiUEClient
-                if not self.start_sending.wait(10.0):  # 10 second timeout
+                print(f"UE {self.rnti}: Registration confirmed, waiting for start signal...")
+                if not self.start_sending.wait(10.0):
                     print(f"UE {self.rnti}: Start signal timeout")
                     return
                 
-                print(f"UE {self.rnti}: Starting requests")
+                print(f"UE {self.rnti}: Start signal received, beginning requests...")
                 
                 # Send requests at specified interval
                 for request_id in range(1, self.num_requests + 1):
@@ -358,13 +352,15 @@ class MultiUEClient:
             self.clients.append(client)
         
         # Increase registration delay between clients
-        self.registration_delay = 1.0  # Reduced from 3.0 to 1.0 seconds
+        self.registration_delay = 1.0
+        self.all_registered = threading.Event()  # Add event for registration coordination
 
     def run(self):
         """Run all UE clients with coordinated start"""
         send_threads = []
         recv_threads = []
         
+        print("Starting receive threads...")
         # Start receive threads first
         for client in self.clients:
             recv_thread = threading.Thread(
@@ -373,8 +369,9 @@ class MultiUEClient:
             )
             recv_threads.append(recv_thread)
             recv_thread.start()
-            time.sleep(0.1)  # Small delay between receive threads
+            time.sleep(0.1)
         
+        print("Starting send threads...")
         # Start send threads
         for client in self.clients:
             send_thread = threading.Thread(
@@ -386,26 +383,34 @@ class MultiUEClient:
         
         # Wait for all UEs to register
         print("Waiting for all UEs to register...")
-        all_registered = True
+        registration_success = True
         for client in self.clients:
-            if not client.registration_complete.wait(10.0):  # 10 second timeout
+            if not client.registration_complete.wait(10.0):
                 print(f"UE {client.rnti}: Registration timeout")
-                all_registered = False
+                registration_success = False
                 break
         
-        if all_registered:
-            print("All UEs registered, starting requests...")
+        if registration_success:
+            print("All UEs registered successfully")
+            time.sleep(1.0)  # Give a moment for all UEs to be ready
+            print("Signaling all UEs to start sending...")
             # Signal all UEs to start sending
             for client in self.clients:
                 client.start_sending.set()
+            print("Start signal sent to all UEs")
         else:
-            print("Not all UEs registered, aborting...")
-            # Cleanup will happen in finally block
+            print("Registration failed for some UEs, aborting...")
         
+        print("Waiting for all threads to complete...")
         # Wait for all threads to complete
         for send_thread, recv_thread in zip(send_threads, recv_threads):
-            send_thread.join()
-            recv_thread.join()
+            try:
+                send_thread.join()
+                recv_thread.join()
+            except Exception as e:
+                print(f"Error joining threads: {e}")
+        
+        print("All threads completed")
 
 def main():
     parser = argparse.ArgumentParser(description='Multi-UE UDP Client')
