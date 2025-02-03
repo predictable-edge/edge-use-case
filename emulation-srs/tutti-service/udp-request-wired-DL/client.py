@@ -108,7 +108,6 @@ class UEClient:
         """
         config: Dictionary containing UE configuration
         {
-            'rnti': int,
             'namespace': str,
             'listen_port': int,
             'num_requests': int,
@@ -116,8 +115,8 @@ class UEClient:
             'interval': int,
             'latency_req': int    # latency requirement in ms
         }
+        Note: RNTI will be fetched in real-time
         """
-        self.rnti = config['rnti']
         self.namespace = config['namespace']
         self.server_ip = server_ip
         self.server_port = server_port
@@ -125,7 +124,11 @@ class UEClient:
         self.packets_per_request = config['request_size']
         self.num_requests = config['num_requests']
         self.interval = config['interval']
-        self.latency_req = config.get('latency_req', 100)  # Default to 20ms if not specified
+        self.latency_req = config.get('latency_req', 100)
+        
+        # Get UE ID from namespace name (assuming format 'ueX' where X is the ID)
+        self.ue_id = int(self.namespace[2:])
+        self.rnti = None  # Will be updated before sending
         
         # Header size and payload size
         header_size = 24  # 6 ints: request_id, seq_num, total_packets, rnti, listen_port, latency_req
@@ -136,17 +139,39 @@ class UEClient:
         self.registration_complete = threading.Event()
         self.registration_timeout = 5.0  # 5 seconds timeout for registration
 
+    def update_rnti(self):
+        """Update RNTI value from real-time UE status"""
+        # First try to trigger RRC connection if needed
+        trigger_rrc_connection(self.namespace)
+        
+        # Get current RNTI
+        new_rnti = get_ue_rnti(self.ue_id)
+        if new_rnti is None:
+            if self.rnti is None:
+                raise Exception(f"Could not get RNTI for UE {self.ue_id}")
+            print(f"Warning: Could not update RNTI, using previous value {self.rnti}")
+        else:
+            if self.rnti != new_rnti:
+                print(f"RNTI updated for UE {self.ue_id}: {self.rnti} -> {new_rnti}")
+            self.rnti = new_rnti
+        return self.rnti
+
     def send_requests(self):
         """Send requests after ensuring registration is complete"""
         try:
-            # Send a single packet to trigger registration
+            # Enter namespace and create socket
             enter_netns(self.namespace)
             send_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            
+            # Get initial RNTI
+            if not self.update_rnti():
+                print(f"Failed to get initial RNTI for UE {self.ue_id}")
+                return
             
             # Send registration packet (request_id = 0)
             header = struct.pack('!IIIIII', 
                                0, 0,  # request_id = 0, seq_num = 0
-                               self.packets_per_request,     # total_packets = 1
+                               self.packets_per_request,
                                self.rnti,
                                self.listen_port,
                                self.latency_req)
@@ -163,6 +188,11 @@ class UEClient:
             
             # Start normal request sending
             for request_id in range(1, self.num_requests + 1):
+                # Update RNTI before each request
+                if not self.update_rnti():
+                    print(f"Failed to update RNTI for request {request_id}")
+                    continue
+
                 with self.lock:
                     self.send_times[request_id] = time.time()
 
@@ -183,7 +213,7 @@ class UEClient:
                     time.sleep(self.interval / 1000.0)
 
         except Exception as e:
-            print(f"Error in send loop for UE {self.rnti}: {e}")
+            print(f"Error in send loop for UE {self.ue_id}: {e}")
         finally:
             send_socket.close()
 
@@ -193,11 +223,11 @@ class UEClient:
             recv_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             recv_socket.bind(('', self.listen_port))
         except Exception as e:
-            print(f"Socket error for UE {self.rnti}: {e}")
+            print(f"Socket error for UE {self.ue_id}: {e}")
             return
 
         os.makedirs(result_dir, exist_ok=True)
-        latency_file = os.path.join(result_dir, f'latency_rnti{self.rnti}.txt')
+        latency_file = os.path.join(result_dir, f'latency_rnti{self.ue_id}.txt')
         completed_requests = {}
 
         try:
@@ -232,7 +262,7 @@ class UEClient:
                             next_request += 1
 
                     except Exception as e:
-                        print(f"Error receiving for UE {self.rnti}: {e}")
+                        print(f"Error receiving for UE {self.ue_id}: {e}")
 
         finally:
             recv_socket.close()

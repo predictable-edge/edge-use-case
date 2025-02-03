@@ -1,6 +1,5 @@
 [
     {
-        "rnti": 4605,
         "namespace": "ue1",
         "listen_port": 10001,
         "num_requests": 1000,
