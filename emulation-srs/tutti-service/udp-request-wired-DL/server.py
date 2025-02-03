@@ -5,7 +5,8 @@ import threading
 from collections import defaultdict
 import time
 
-MAX_UDP_SIZE = 1400
+MAX_UDP_SIZE = 1300
+HEADER_SIZE = 24    # 4 + 4 + 4 + 4 + 4 + 4 bytes
 
 class UETracker:
     def __init__(self, rnti_str, client_port, latency_req, request_size, controller_ip, controller_port):
@@ -175,7 +176,7 @@ class Server:
     def handle_request(self, data, client_address):
         try:
             # Unpack header: request_id, seq_num, total_packets, response_port, rnti_str, latency_req
-            header = struct.unpack('!IIII4sI', data[:28])
+            header = struct.unpack('!IIII4sI', data[:24])  # Change to 24 bytes
             request_id, seq_num, total_packets, response_port, rnti_bytes, latency_req = header
             rnti_str = rnti_bytes.decode().strip()  # Convert bytes to string and remove padding
             
@@ -183,7 +184,7 @@ class Server:
             self.ue_last_active[client_key] = time.time()
             
             # Calculate total request size based on number of packets
-            payload_size = MAX_UDP_SIZE - 28  # Header size is 28 bytes
+            payload_size = MAX_UDP_SIZE - 24  # Header size is 24 bytes
             request_size = total_packets * payload_size
             
             # Handle registration packet (request_id = 0)
@@ -210,7 +211,7 @@ class Server:
                         self.ue_trackers[client_key] = tracker
                     
                     # Send registration acknowledgment
-                    response = struct.pack('!II', 0, rnti_str)
+                    response = struct.pack('!I4s', 0, rnti_str.encode().ljust(4))
                     self.socket.sendto(response, (self.response_ip, response_port))
                     return
             
@@ -228,7 +229,7 @@ class Server:
             
             # Process packet
             if tracker.add_packet(request_id, seq_num, total_packets):
-                response = struct.pack('!II', request_id, rnti_str)
+                response = struct.pack('!I4s', request_id, rnti_str.encode().ljust(4))
                 self.socket.sendto(response, (self.response_ip, tracker.client_port))
                 print(f"Completed request {request_id} from RNTI {rnti_str} ({total_packets} packets)")
                 

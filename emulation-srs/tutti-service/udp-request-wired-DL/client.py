@@ -242,7 +242,8 @@ class UEClient:
                 while len(completed_requests) < self.num_requests:
                     try:
                         data, _ = recv_socket.recvfrom(64)
-                        request_id, recv_rnti = struct.unpack('!II', data[:8])
+                        request_id, rnti_bytes = struct.unpack('!I4s', data[:8])
+                        recv_rnti = rnti_bytes.decode().strip()
                         
                         if recv_rnti != self.rnti:
                             continue
