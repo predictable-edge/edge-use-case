@@ -103,7 +103,7 @@ class UEClient:
             # Send registration packet (request_id = 0)
             header = struct.pack('!IIIIII', 
                                0, 0,  # request_id = 0, seq_num = 0
-                               1,     # total_packets = 1
+                               self.packets_per_request,     # total_packets = 1
                                self.rnti,
                                self.listen_port,
                                self.latency_req)

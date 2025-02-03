@@ -9,24 +9,31 @@ MAX_UDP_SIZE = 1400
 
 class UETracker:
     def __init__(self, rnti, client_port, latency_req, request_size, controller_ip, controller_port):
+        # Initialize timing parameters first
+        self.registration_wait = 2.0  # Wait 2 seconds after registration
+        self.registration_time = None  # Track when UE was registered
+        self.last_request_time = time.time()
+        
+        # Initialize UE parameters
         self.rnti = rnti
         self.client_port = client_port
         self.latency_req = latency_req  # Latency requirement in ms
         self.request_size = request_size  # Total request size in bytes
+        
+        # Initialize tracking structures
         self.packets = defaultdict(lambda: {'total': 0, 'received': set()})
         self.lock = threading.Lock()
+        self.request_count = 0
+        self.current_request = None
         
+        # Initialize controller connection
         self.controller_ip = controller_ip
         self.controller_port = controller_port
         self.controller_socket = None
         self.registered = False  # Track if UE is registered with controller
-        self.connect_to_controller()
         
-        self.last_request_time = time.time()
-        self.request_count = 0
-        self.current_request = None
-        self.registration_time = None  # Track when UE was registered
-        self.registration_wait = 2.0  # Wait 2 seconds after registration
+        # Connect to controller
+        self.connect_to_controller()
     
     def connect_to_controller(self):
         """Connect to the controller and register"""
@@ -34,13 +41,17 @@ class UETracker:
             return  # Already connected
 
         try:
+            # First connect and send application registration
             self.controller_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.controller_socket.connect((self.controller_ip, self.controller_port))
             self.controller_socket.send(b"tutti_server")
+            time.sleep(0.1)  # Wait for registration to be processed
+            
+            # Then register the UE
             if not self.registered:
                 self._register_ue()
                 self.registered = True
-                self.registration_time = time.time()  # Record registration time
+                self.registration_time = time.time()
         except Exception as e:
             print(f"Failed to connect to controller: {e}")
             if self.controller_socket:
@@ -168,7 +179,7 @@ class Server:
             if request_id == 0:
                 with self.tracker_lock:
                     if client_key not in self.ue_trackers:
-                        print(f"Registering new UE - RNTI: {rnti}, Response Port: {response_port}, Latency Req: {latency_req}ms")
+                        print(f"Registering new UE - RNTI: {rnti}, Response Port: {response_port}, Latency Req: {latency_req}ms, Request Size: {request_size} bytes")
                         tracker = UETracker(
                             rnti=rnti,
                             client_port=response_port,
