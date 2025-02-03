@@ -197,6 +197,7 @@ class UEClient:
                     return
                 
                 print(f"UE {self.rnti}: Registration confirmed, starting requests...")
+                time.sleep(5)
                 
                 # Send requests
                 for request_id in range(1, self.num_requests + 1):
