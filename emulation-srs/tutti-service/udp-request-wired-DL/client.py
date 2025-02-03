@@ -142,6 +142,7 @@ class UEClient:
         
         self.send_times = {}
         self.lock = threading.Lock()
+        self.start_sending = threading.Event()  # Add event for coordinated start
         self.registration_complete = threading.Event()
         self.registration_timeout = 5.0  # 5 seconds timeout for registration
         
@@ -216,7 +217,7 @@ class UEClient:
         try:
             enter_netns(self.namespace)
             send_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            send_socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024*1024*4)  # 4MB buffer
+            send_socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024*1024*4)
             
             # Start buffer processing thread
             buffer_thread = threading.Thread(target=self._process_buffer, args=(send_socket,))
@@ -239,7 +240,14 @@ class UEClient:
                     print(f"UE {self.rnti}: Registration timeout")
                     return
                 
-                print(f"UE {self.rnti}: Registration complete, starting requests")
+                print(f"UE {self.rnti}: Registration complete, waiting for start signal")
+                
+                # Wait for start signal from MultiUEClient
+                if not self.start_sending.wait(10.0):  # 10 second timeout
+                    print(f"UE {self.rnti}: Start signal timeout")
+                    return
+                
+                print(f"UE {self.rnti}: Starting requests")
                 
                 # Send requests at specified interval
                 for request_id in range(1, self.num_requests + 1):
@@ -350,10 +358,10 @@ class MultiUEClient:
             self.clients.append(client)
         
         # Increase registration delay between clients
-        self.registration_delay = 3.0  # 3 seconds between client starts
+        self.registration_delay = 1.0  # Reduced from 3.0 to 1.0 seconds
 
     def run(self):
-        """Run all UE clients with staggered start"""
+        """Run all UE clients with coordinated start"""
         send_threads = []
         recv_threads = []
         
@@ -365,16 +373,34 @@ class MultiUEClient:
             )
             recv_threads.append(recv_thread)
             recv_thread.start()
-            time.sleep(0.5)  # Longer delay between receive thread starts
+            time.sleep(0.1)  # Small delay between receive threads
         
-        # Start send threads with delay between each client
+        # Start send threads
         for client in self.clients:
             send_thread = threading.Thread(
                 target=client.send_requests
             )
             send_threads.append(send_thread)
             send_thread.start()
-            time.sleep(self.registration_delay)  # Wait between client starts
+            time.sleep(self.registration_delay)
+        
+        # Wait for all UEs to register
+        print("Waiting for all UEs to register...")
+        all_registered = True
+        for client in self.clients:
+            if not client.registration_complete.wait(10.0):  # 10 second timeout
+                print(f"UE {client.rnti}: Registration timeout")
+                all_registered = False
+                break
+        
+        if all_registered:
+            print("All UEs registered, starting requests...")
+            # Signal all UEs to start sending
+            for client in self.clients:
+                client.start_sending.set()
+        else:
+            print("Not all UEs registered, aborting...")
+            # Cleanup will happen in finally block
         
         # Wait for all threads to complete
         for send_thread, recv_thread in zip(send_threads, recv_threads):
