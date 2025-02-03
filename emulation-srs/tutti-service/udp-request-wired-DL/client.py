@@ -30,20 +30,23 @@ def enter_netns(namespace):
 def parse_ue_info(line):
     """
     Parse a single line of UE information
-    Args:
-        line: string, a line from UE status output
+    Format example:
+    NR    1     2  0    0         idle              registered     1 10.45.0.3
+    NR    0     1  0 4b0c      running              registered     1 10.45.0.2
     Returns:
-        tuple: (ue_id, rnti, rrc_state, emm_state) or None if parse fails
+        tuple: (ue_id, rnti_str, rrc_state, emm_state) or None if parse fails
+    Note: RNTI is kept as string to handle both decimal and hex formats
     """
     try:
         parts = line.split()
-        if len(parts) >= 8 and parts[0] == "NR":
-            ue_id = int(parts[2])  # UE ID is in column 3
-            rnti = int(parts[4])   # RNTI is in column 5
-            rrc_state = parts[5]    # RRC state in column 6
-            emm_state = parts[6]    # EMM state in column 7
-            return (ue_id, rnti, rrc_state, emm_state)
-    except Exception:
+        if len(parts) >= 8 and 'NR' in parts[0]:
+            ue_id = int(parts[2])     # UE ID is in column 3
+            rnti_str = parts[4]       # RNTI is in column 5 (keep as string)
+            rrc_state = parts[5]      # RRC state in column 6
+            emm_state = parts[6]      # EMM state in column 7
+            return (ue_id, rnti_str, rrc_state, emm_state)
+    except Exception as e:
+        print(f"Debug - Parse error for line '{line}': {e}")
         return None
     return None
 
@@ -71,11 +74,11 @@ def get_ue_rnti(ue_id):
             for line in f:
                 info = parse_ue_info(line)
                 if info and info[0] == ue_id:
-                    ue_id, rnti, rrc_state, emm_state = info
-                    if rnti > 0 and rrc_state == "running":
-                        return rnti
+                    ue_id, rnti_str, rrc_state, emm_state = info
+                    if rnti_str and rrc_state == "running":
+                        return rnti_str
                     else:
-                        print(f"UE {ue_id} not in running state: RNTI={rnti}, RRC={rrc_state}, EMM={emm_state}")
+                        print(f"UE {ue_id} not in running state: RNTI={rnti_str}, RRC={rrc_state}, EMM={emm_state}")
                         return None
     except Exception as e:
         print(f"Error getting RNTI: {e}")
@@ -117,7 +120,7 @@ class UEClient:
             'interval': int,
             'latency_req': int    # latency requirement in ms
         }
-        Note: RNTI will be fetched in real-time
+        Note: RNTI is stored as string to handle both decimal and hex formats
         """
         self.namespace = config['namespace']
         self.server_ip = server_ip
@@ -133,7 +136,7 @@ class UEClient:
         self.rnti = None  # Will be updated before sending
         
         # Header size and payload size
-        header_size = 24  # 6 ints: request_id, seq_num, total_packets, rnti, listen_port, latency_req
+        header_size = 28  # 5 ints + 1 string(4 chars): request_id, seq_num, total_packets, listen_port, latency_req, rnti
         self.payload_size = MAX_UDP_SIZE - header_size
         
         self.send_times = {}
@@ -175,11 +178,11 @@ class UEClient:
             send_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             
             # Send registration packet (request_id = 0)
-            header = struct.pack('!IIIIII', 
+            header = struct.pack('!IIII4sI', 
                                0, 0,  # request_id = 0, seq_num = 0
                                self.packets_per_request,
-                               self.rnti,
                                self.listen_port,
+                               self.rnti.encode().ljust(4), # Ensure RNTI is 4 chars
                                self.latency_req)
             data = header + b'\0' * self.payload_size
             send_socket.sendto(data, (self.server_ip, self.server_port))
@@ -198,11 +201,11 @@ class UEClient:
                     self.send_times[request_id] = time.time()
 
                 for seq_num in range(self.packets_per_request):
-                    header = struct.pack('!IIIIII', 
+                    header = struct.pack('!IIII4sI', 
                                        request_id, seq_num, 
                                        self.packets_per_request,
-                                       self.rnti,
                                        self.listen_port,
+                                       self.rnti.encode().ljust(4), # Ensure RNTI is 4 chars
                                        self.latency_req)
                     data = header + b'\0' * self.payload_size
                     send_socket.sendto(data, (self.server_ip, self.server_port))

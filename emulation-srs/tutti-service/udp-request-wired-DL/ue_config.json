@@ -2,7 +2,7 @@
     {
         "namespace": "ue1",
         "listen_port": 10001,
-        "num_requests": 1000,
+        "num_requests": 300,
         "request_size": 5,
         "interval": 100,
         "latency_req": 50
@@ -10,7 +10,7 @@
     {
         "namespace": "ue2",
         "listen_port": 10002,
-        "num_requests": 500,
+        "num_requests": 300,
         "request_size": 20,
         "interval": 100,
         "latency_req": 100
@@ -18,7 +18,7 @@
     {
         "namespace": "ue3",
         "listen_port": 10003,
-        "num_requests": 500,
+        "num_requests": 300,
         "request_size": 20,
         "interval": 100,
         "latency_req": 200

@@ -8,14 +8,24 @@ import time
 MAX_UDP_SIZE = 1400
 
 class UETracker:
-    def __init__(self, rnti, client_port, latency_req, request_size, controller_ip, controller_port):
+    def __init__(self, rnti_str, client_port, latency_req, request_size, controller_ip, controller_port):
+        """
+        Initialize UE tracker
+        Args:
+            rnti_str: string, RNTI value in either decimal or hex format
+            client_port: int, port to send responses to
+            latency_req: int, latency requirement in ms
+            request_size: int, total request size in bytes
+            controller_ip: str, IP address of the controller
+            controller_port: int, port of the controller
+        """
         # Initialize timing parameters first
         self.registration_wait = 2.0  # Wait 2 seconds after registration
         self.registration_time = None  # Track when UE was registered
         self.last_request_time = time.time()
         
         # Initialize UE parameters
-        self.rnti = rnti
+        self.rnti = rnti_str  # Store RNTI as string
         self.client_port = client_port
         self.latency_req = latency_req  # Latency requirement in ms
         self.request_size = request_size  # Total request size in bytes
@@ -164,24 +174,25 @@ class Server:
     
     def handle_request(self, data, client_address):
         try:
-            # Unpack header: request_id, seq_num, total_packets, rnti, response_port, latency_req
-            header = struct.unpack('!IIIIII', data[:24])
-            request_id, seq_num, total_packets, rnti, response_port, latency_req = header
+            # Unpack header: request_id, seq_num, total_packets, response_port, rnti_str, latency_req
+            header = struct.unpack('!IIII4sI', data[:28])
+            request_id, seq_num, total_packets, response_port, rnti_bytes, latency_req = header
+            rnti_str = rnti_bytes.decode().strip()  # Convert bytes to string and remove padding
             
             client_key = (client_address[0], client_address[1])
             self.ue_last_active[client_key] = time.time()
             
             # Calculate total request size based on number of packets
-            payload_size = MAX_UDP_SIZE - 24  # Header size is 24 bytes
+            payload_size = MAX_UDP_SIZE - 28  # Header size is 28 bytes
             request_size = total_packets * payload_size
             
             # Handle registration packet (request_id = 0)
             if request_id == 0:
                 with self.tracker_lock:
                     if client_key not in self.ue_trackers:
-                        print(f"Registering new UE - RNTI: {rnti}, Response Port: {response_port}, Latency Req: {latency_req}ms, Request Size: {request_size} bytes")
+                        print(f"Registering new UE - RNTI: {rnti_str}, Response Port: {response_port}, Latency Req: {latency_req}ms, Request Size: {request_size} bytes")
                         tracker = UETracker(
-                            rnti=rnti,
+                            rnti_str=rnti_str,
                             client_port=response_port,
                             latency_req=latency_req,
                             request_size=request_size,
@@ -189,24 +200,24 @@ class Server:
                             controller_port=self.controller_port
                         )
                         
-                        if rnti not in self.registered_rntis:
+                        if rnti_str not in self.registered_rntis:
                             tracker.connect_to_controller()
                             if tracker.registered:
-                                self.registered_rntis.add(rnti)
+                                self.registered_rntis.add(rnti_str)
                         else:
                             tracker.registered = True
                         
                         self.ue_trackers[client_key] = tracker
                     
                     # Send registration acknowledgment
-                    response = struct.pack('!II', 0, rnti)
+                    response = struct.pack('!II', 0, rnti_str)
                     self.socket.sendto(response, (self.response_ip, response_port))
                     return
             
             # Handle normal requests
             with self.tracker_lock:
                 if client_key not in self.ue_trackers:
-                    print(f"Received request from unregistered UE - RNTI: {rnti}")
+                    print(f"Received request from unregistered UE - RNTI: {rnti_str}")
                     return
                 
                 tracker = self.ue_trackers[client_key]
@@ -217,9 +228,9 @@ class Server:
             
             # Process packet
             if tracker.add_packet(request_id, seq_num, total_packets):
-                response = struct.pack('!II', request_id, tracker.rnti)
+                response = struct.pack('!II', request_id, rnti_str)
                 self.socket.sendto(response, (self.response_ip, tracker.client_port))
-                print(f"Completed request {request_id} from RNTI {rnti} ({total_packets} packets)")
+                print(f"Completed request {request_id} from RNTI {rnti_str} ({total_packets} packets)")
                 
         except Exception as e:
             print(f"Error handling request: {e}")
