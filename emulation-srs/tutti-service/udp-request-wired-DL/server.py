@@ -4,6 +4,8 @@ import struct
 import threading
 from collections import defaultdict
 import time
+from queue import Queue
+import concurrent.futures
 
 MAX_UDP_SIZE = 1300
 HEADER_SIZE = 24    # 4 + 4 + 4 + 4 + 4 + 4 bytes
@@ -45,6 +47,18 @@ class UETracker:
         
         # Connect to controller
         self.connect_to_controller()
+        
+        # Add request tracking
+        self.request_stats = {
+            'total_requests': 0,
+            'completed_requests': 0,
+            'failed_requests': 0,
+            'avg_processing_time': 0
+        }
+        
+        # Add rate limiting
+        self.last_controller_notify = 0
+        self.notify_interval = 0.1  # 100ms minimum between notifications
     
     def connect_to_controller(self):
         """Connect to the controller and register"""
@@ -112,6 +126,12 @@ class UETracker:
                 self.registered = False
                 self.registration_time = None
 
+        # Add rate limiting
+        if current_time - self.last_controller_notify < self.notify_interval:
+            return
+        
+        self.last_controller_notify = current_time
+
     def add_packet(self, request_id, seq_num, total_packets):
         with self.lock:
             # If this is a new request, store it
@@ -156,6 +176,18 @@ class Server:
         self.tracker_lock = threading.Lock()  # Add lock for thread safety
         self.cleanup_thread = threading.Thread(target=self._cleanup_inactive_ues, daemon=True)
         self.cleanup_thread.start()
+        
+        # Add request queue and worker pool
+        self.request_queue = Queue()
+        self.num_workers = 8  # Number of worker threads
+        self.worker_pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=self.num_workers,
+            thread_name_prefix="RequestWorker"
+        )
+        
+        # Start worker threads
+        for _ in range(self.num_workers):
+            self.worker_pool.submit(self._process_request_queue)
     
     def _cleanup_inactive_ues(self):
         """Periodically clean up inactive UE trackers"""
@@ -174,6 +206,17 @@ class Server:
             
             time.sleep(5)  # Check every 5 seconds
     
+    def _process_request_queue(self):
+        """Worker thread to process requests from queue"""
+        while True:
+            try:
+                data, client_address = self.request_queue.get()
+                self.handle_request(data, client_address)
+            except Exception as e:
+                print(f"Error in worker thread: {e}")
+            finally:
+                self.request_queue.task_done()
+
     def handle_request(self, data, client_address):
         try:
             # Unpack header: request_id, seq_num, total_packets, response_port, rnti_str, latency_req
@@ -245,18 +288,16 @@ class Server:
             
             while True:
                 data, client_address = self.socket.recvfrom(MAX_UDP_SIZE + 100)
-                thread = threading.Thread(
-                    target=self.handle_request,
-                    args=(data, client_address)
-                )
-                thread.start()
+                # Put request in queue instead of creating new thread
+                self.request_queue.put((data, client_address))
                 
         except Exception as e:
             print(f"Server error: {e}")
         finally:
+            self.worker_pool.shutdown(wait=True)
             self.socket.close()
             for tracker in self.ue_trackers.values():
-                tracker.controller_socket.close()
+                tracker.cleanup()
 
 def main():
     parser = argparse.ArgumentParser(description='Tutti UDP Server')
