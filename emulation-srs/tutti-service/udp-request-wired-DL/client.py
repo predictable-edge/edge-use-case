@@ -121,7 +121,6 @@ class UEClient:
             'interval': int,
             'latency_req': int    # latency requirement in ms
         }
-        Note: RNTI is stored as string to handle both decimal and hex formats
         """
         self.namespace = config['namespace']
         self.server_ip = server_ip
@@ -132,33 +131,20 @@ class UEClient:
         self.interval = config['interval']
         self.latency_req = config.get('latency_req', 100)
         
-        # Get UE ID from namespace name (assuming format 'ueX' where X is the ID)
+        # Get UE ID from namespace name
         self.ue_id = int(self.namespace[2:])
-        self.rnti = None  # Will be updated before sending
+        self.rnti = None
         
         # Header size and payload size
-        header_size = 28  # 5 ints + 1 string(4 chars): request_id, seq_num, total_packets, listen_port, latency_req, rnti
+        header_size = 28  # 5 ints + 1 string(4 chars)
         self.payload_size = MAX_UDP_SIZE - header_size
         
         self.send_times = {}
         self.lock = threading.Lock()
-        self.start_sending = threading.Event()  # Add event for coordinated start
         self.registration_complete = threading.Event()
-        self.registration_timeout = 5.0  # 5 seconds timeout for registration
+        self.registration_timeout = 5.0
         
-        # Simple request queue
-        self.request_buffer = queue.Queue(maxsize=5000)
-        self.inflight_requests = set()
-        
-        # Statistics tracking
-        self.stats = {
-            'sent_requests': 0,
-            'completed_requests': 0,
-            'failed_requests': 0,
-            'avg_latency': 0
-        }
-        
-        # Initialize RNTI at startup
+        # Initialize RNTI
         self.initialize_connection()
 
     def initialize_connection(self):
@@ -184,61 +170,14 @@ class UEClient:
         # Just return the stored RNTI - no need to check repeatedly
         return self.rnti
 
-    def _process_buffer(self, send_socket):
-        """Process queued requests immediately"""
-        print(f"UE {self.rnti}: Buffer processing thread started")
-        
-        while True:
-            try:
-                # Get request from queue
-                try:
-                    data, request_id = self.request_buffer.get(timeout=0.001)
-                    print(f"UE {self.rnti}: Processing request {request_id} from buffer")
-                except queue.Empty:
-                    # Only exit if we've received start signal and no more requests
-                    if self.start_sending.is_set() and not self.inflight_requests and self.request_buffer.empty():
-                        print(f"UE {self.rnti}: No more requests to process, exiting buffer thread")
-                        break
-                    continue
-
-                # Send immediately
-                try:
-                    send_socket.sendto(data, (self.server_ip, self.server_port))
-                    self.stats['sent_requests'] += 1
-                    if request_id % 100 == 0:
-                        print(f"UE {self.rnti}: Successfully sent request {request_id}")
-                except Exception as e:
-                    print(f"UE {self.rnti}: Error sending request {request_id}: {e}")
-                    self.stats['failed_requests'] += 1
-                finally:
-                    self.request_buffer.task_done()
-
-            except Exception as e:
-                print(f"UE {self.rnti}: Error in buffer processing thread: {e}")
-                time.sleep(0.001)
-
-        print(f"UE {self.rnti}: Buffer processing thread finished. Total sent: {self.stats['sent_requests']}")
-
     def send_requests(self):
         try:
-            # Enter namespace before creating socket
+            # Enter namespace and create socket
             enter_netns(self.namespace)
             print(f"UE {self.rnti}: Entered namespace {self.namespace}")
             
-            # Create and configure socket
             send_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            send_socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024*1024*4)
             print(f"UE {self.rnti}: Created socket with server {self.server_ip}:{self.server_port}")
-            
-            # Start buffer processing thread
-            buffer_thread = threading.Thread(
-                target=self._process_buffer,
-                args=(send_socket,),
-                daemon=True,
-                name=f"Buffer-{self.rnti}"
-            )
-            buffer_thread.start()
-            print(f"UE {self.rnti}: Started buffer processing thread")
             
             try:
                 # Send registration packet
@@ -257,18 +196,12 @@ class UEClient:
                     print(f"UE {self.rnti}: Registration timeout")
                     return
                 
-                print(f"UE {self.rnti}: Registration confirmed, waiting for start signal...")
-                if not self.start_sending.wait(10.0):
-                    print(f"UE {self.rnti}: Start signal timeout")
-                    return
+                print(f"UE {self.rnti}: Registration confirmed, starting requests...")
                 
-                print(f"UE {self.rnti}: Start signal received, beginning requests...")
-                
-                # Send requests at specified interval
+                # Send requests
                 for request_id in range(1, self.num_requests + 1):
                     with self.lock:
                         self.send_times[request_id] = time.time()
-                        self.inflight_requests.add(request_id)
                     
                     for seq_num in range(self.packets_per_request):
                         header = struct.pack('!IIII4sI', 
@@ -278,22 +211,18 @@ class UEClient:
                                            self.rnti.encode().ljust(4),
                                            self.latency_req)
                         data = header + b'\0' * self.payload_size
-                        self.request_buffer.put((data, request_id), timeout=1.0)
+                        send_socket.sendto(data, (self.server_ip, self.server_port))
                     
                     if request_id % 100 == 0:
-                        print(f"UE {self.rnti}: Queued request {request_id}")
+                        print(f"UE {self.rnti}: Sent request {request_id}")
                     
                     if request_id != self.num_requests:
-                        time.sleep(self.interval / 1000.0)  # Sleep for specified interval
+                        time.sleep(self.interval / 1000.0)
                 
-                print(f"UE {self.rnti}: All requests queued, waiting for buffer to empty")
-                self.request_buffer.join()
-                print(f"UE {self.rnti}: Buffer empty, waiting for buffer thread to finish")
-                buffer_thread.join(timeout=1.0)
-                print(f"UE {self.rnti}: Send complete. Sent: {self.stats['sent_requests']}, Failed: {self.stats['failed_requests']}")
+                print(f"UE {self.rnti}: All requests sent")
                 
             except Exception as e:
-                print(f"Error queueing requests for UE {self.ue_id}: {e}")
+                print(f"Error sending requests for UE {self.ue_id}: {e}")
                 raise
             
         except Exception as e:
@@ -375,12 +304,11 @@ class MultiUEClient:
             )
             self.clients.append(client)
         
-        # Increase registration delay between clients
-        self.registration_delay = 1.0
-        self.all_registered = threading.Event()  # Add event for registration coordination
+        # Small delay between starting clients
+        self.start_delay = 0.5
 
     def run(self):
-        """Run all UE clients with coordinated start"""
+        """Run all UE clients independently"""
         send_threads = []
         recv_threads = []
         
@@ -396,34 +324,14 @@ class MultiUEClient:
             time.sleep(0.1)
         
         print("Starting send threads...")
-        # Start send threads
+        # Start send threads with small delay between each
         for client in self.clients:
             send_thread = threading.Thread(
                 target=client.send_requests
             )
             send_threads.append(send_thread)
             send_thread.start()
-            time.sleep(self.registration_delay)
-        
-        # Wait for all UEs to register
-        print("Waiting for all UEs to register...")
-        registration_success = True
-        for client in self.clients:
-            if not client.registration_complete.wait(10.0):
-                print(f"UE {client.rnti}: Registration timeout")
-                registration_success = False
-                break
-        
-        if registration_success:
-            print("All UEs registered successfully")
-            time.sleep(1.0)  # Give a moment for all UEs to be ready
-            print("Signaling all UEs to start sending...")
-            # Signal all UEs to start sending
-            for client in self.clients:
-                client.start_sending.set()
-            print("Start signal sent to all UEs")
-        else:
-            print("Registration failed for some UEs, aborting...")
+            time.sleep(self.start_delay)
         
         print("Waiting for all threads to complete...")
         # Wait for all threads to complete
