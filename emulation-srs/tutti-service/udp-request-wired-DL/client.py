@@ -89,21 +89,26 @@ def trigger_rrc_connection(namespace):
     Returns:
         bool: True if ping was successful, False otherwise
     """
-    try:
-        cmd = f"ip netns exec {namespace} ping -c 1 192.168.2.2"
-        print(cmd)
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-        
-        if result.returncode == 0:
-            print(f"Successfully triggered RRC connection in namespace {namespace}")
-            return True
-        else:
-            print(f"Failed to trigger RRC connection in namespace {namespace}")
-            return False
+    max_attempts = 5  # Maximum number of ping attempts
+    for attempt in range(max_attempts):
+        try:
+            cmd = f"ip netns exec {namespace} ping -c 1 192.168.2.2"
+            print(f"Attempt {attempt + 1}: {cmd}")
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
             
-    except Exception as e:
-        print(f"Error while triggering RRC connection: {e}")
-        return False
+            if result.returncode == 0:
+                print(f"Successfully triggered RRC connection in namespace {namespace}")
+                time.sleep(1)  # Wait for RRC connection to stabilize
+                return True
+            else:
+                print(f"Failed to trigger RRC connection in namespace {namespace}, retrying...")
+                time.sleep(2)  # Wait before retry
+                
+        except Exception as e:
+            print(f"Error while triggering RRC connection: {e}")
+            time.sleep(2)  # Wait before retry
+    
+    return False
 
 class UEClient:
     def __init__(self, config, server_ip, server_port):
@@ -146,14 +151,21 @@ class UEClient:
 
     def initialize_connection(self):
         """Initialize RRC connection and get initial RNTI"""
-        # First try to trigger RRC connection
-        trigger_rrc_connection(self.namespace)
+        # First try to trigger RRC connection with retries
+        if not trigger_rrc_connection(self.namespace):
+            raise Exception(f"Failed to establish RRC connection for UE {self.ue_id} after multiple attempts")
         
-        # Get initial RNTI
-        self.rnti = get_ue_rnti(self.ue_id)
-        if self.rnti is None:
-            raise Exception(f"Could not get initial RNTI for UE {self.ue_id}")
-        print(f"Successfully initialized UE {self.ue_id} with RNTI {self.rnti}")
+        # Try to get RNTI multiple times
+        max_attempts = 5
+        for attempt in range(max_attempts):
+            self.rnti = get_ue_rnti(self.ue_id)
+            if self.rnti is not None:
+                print(f"Successfully initialized UE {self.ue_id} with RNTI {self.rnti}")
+                return
+            print(f"Attempt {attempt + 1}: Failed to get RNTI for UE {self.ue_id}, retrying...")
+            time.sleep(2)  # Wait before retry
+        
+        raise Exception(f"Could not get initial RNTI for UE {self.ue_id} after {max_attempts} attempts")
 
     def update_rnti(self):
         """Update RNTI value from real-time UE status"""
