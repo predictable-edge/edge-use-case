@@ -7,23 +7,5 @@
         "request_size": 5,
         "interval": 100,
         "latency_req": 50
-    },
-    {
-        "rnti": 4602,
-        "namespace": "ue2",
-        "listen_port": 10002,
-        "num_requests": 500,
-        "request_size": 10,
-        "interval": 200,
-        "latency_req": 100
-    },
-    {
-        "rnti": 4604,
-        "namespace": "ue3",
-        "listen_port": 10003,
-        "num_requests": 2000,
-        "request_size": 3,
-        "interval": 50,
-        "latency_req": 200
     }
 ] 

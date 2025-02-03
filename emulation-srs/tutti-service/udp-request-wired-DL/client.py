@@ -26,39 +26,82 @@ def enter_netns(namespace):
         print(f"Failed to enter namespace {namespace}: {e}")
         raise
 
-def get_ue_info_from_namespace(namespace):
+def parse_ue_info(line):
     """
-    Read UE index and RNTI from the namespace
-    Returns: (ue_idx, rnti) or None if not found
+    Parse a single line of UE information
+    Args:
+        line: string, a line from UE status output
+    Returns:
+        tuple: (ue_id, rnti, rrc_state, emm_state) or None if parse fails
     """
     try:
-        # Store current namespace to restore later
-        with open('/proc/self/ns/net', 'r') as f:
-            original_ns = f.fileno()
-            
-        # Enter UE namespace
-        enter_netns(namespace)
-        
-        # Read UE info from srsRAN files
-        # Note: Update these paths based on actual srsRAN file locations
-        ue_idx_path = '/tmp/ue_idx'
-        rnti_path = '/tmp/rnti'
-        
-        try:
-            with open(ue_idx_path, 'r') as f:
-                ue_idx = int(f.read().strip())
-            with open(rnti_path, 'r') as f:
-                rnti = int(f.read().strip())
-            return ue_idx, rnti
-        except FileNotFoundError:
-            print(f"UE info files not found in namespace {namespace}")
-            return None
-        finally:
-            # Restore original namespace
-            setns(original_ns, 0)
-    except Exception as e:
-        print(f"Error reading UE info from namespace {namespace}: {e}")
+        parts = line.split()
+        if len(parts) >= 8 and parts[0] == "NR":
+            ue_id = int(parts[2])  # UE ID is in column 3
+            rnti = int(parts[4])   # RNTI is in column 5
+            rrc_state = parts[5]    # RRC state in column 6
+            emm_state = parts[6]    # EMM state in column 7
+            return (ue_id, rnti, rrc_state, emm_state)
+    except Exception:
         return None
+    return None
+
+def get_ue_rnti(ue_id):
+    """
+    Get UE's RNTI by parsing screen output from amarisoft UE command.
+    Args:
+        ue_id: int, UE identifier (1-based)
+    Returns:
+        int: RNTI value if found and valid, None otherwise
+    """
+    try:
+        # Execute command to send 'ue' to screen session
+        cmd = "screen -S lte -X stuff 'ue\n'"
+        subprocess.run(cmd, shell=True)
+        
+        time.sleep(0.5)
+        
+        # Capture screen output to file
+        cmd = "screen -S lte -X hardcopy /tmp/ue_output.txt"
+        subprocess.run(cmd, shell=True)
+        
+        # Parse output file to find RNTI for specific UE
+        with open('/tmp/ue_output.txt', 'r') as f:
+            for line in f:
+                info = parse_ue_info(line)
+                if info and info[0] == ue_id:
+                    ue_id, rnti, rrc_state, emm_state = info
+                    if rnti > 0 and rrc_state == "running":
+                        return rnti
+                    else:
+                        print(f"UE {ue_id} not in running state: RNTI={rnti}, RRC={rrc_state}, EMM={emm_state}")
+                        return None
+    except Exception as e:
+        print(f"Error getting RNTI: {e}")
+    return None
+
+def trigger_rrc_connection(namespace):
+    """
+    Trigger RRC connection by sending ping packets in specified network namespace
+    Args:
+        namespace: network namespace name (e.g. 'ue0')
+    Returns:
+        bool: True if ping was successful, False otherwise
+    """
+    try:
+        cmd = f"ip netns exec {namespace} ping -s 32 -c 1 192.168.2.2"
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        
+        if result.returncode == 0:
+            print(f"Successfully triggered RRC connection in namespace {namespace}")
+            return True
+        else:
+            print(f"Failed to trigger RRC connection in namespace {namespace}")
+            return False
+            
+    except Exception as e:
+        print(f"Error while triggering RRC connection: {e}")
+        return False
 
 class UEClient:
     def __init__(self, config, server_ip, server_port):
