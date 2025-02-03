@@ -21,8 +21,8 @@ class UETracker:
             controller_port: int, port of the controller
         """
         # Initialize timing parameters first
-        self.registration_wait = 2.0  # Wait 2 seconds after registration
-        self.registration_time = None  # Track when UE was registered
+        self.registration_wait = 0.5  # Reduced from 2.0 to 0.5 seconds
+        self.registration_time = None
         self.last_request_time = time.time()
         
         # Initialize UE parameters
@@ -78,7 +78,8 @@ class UETracker:
         msg = f"NEW_UE|{self.rnti}|0|{self.latency_req}|{self.request_size}"
         try:
             self.controller_socket.send(msg.encode('utf-8'))
-            time.sleep(self.registration_wait)  # Wait for controller to process
+            # Don't sleep here, just mark registration time
+            self.registration_time = time.time()
         except Exception as e:
             print(f"Failed to register UE: {e}")
             self.controller_socket.close()
@@ -92,24 +93,24 @@ class UETracker:
             if not self.controller_socket:
                 return
 
-        # Wait for registration to be processed by controller
+        # Check if enough time has passed since registration
         if self.registration_time and time.time() - self.registration_time < self.registration_wait:
             return
 
-        if seq_num == 0:
-            current_time = time.time()
-            if current_time - self.last_request_time >= 0.1:
-                msg = f"REQUEST|{self.rnti}|{request_id}"
-                try:
-                    self.controller_socket.send(msg.encode('utf-8'))
-                    self.last_request_time = current_time
-                except Exception as e:
-                    print(f"Failed to notify controller: {e}")
-                    if self.controller_socket:
-                        self.controller_socket.close()
-                    self.controller_socket = None
-                    self.registered = False
-                    self.registration_time = None
+        # Rate limit notifications to avoid overwhelming controller
+        current_time = time.time()
+        if seq_num == 0 and current_time - self.last_request_time >= 0.1:
+            msg = f"REQUEST|{self.rnti}|{request_id}"
+            try:
+                self.controller_socket.send(msg.encode('utf-8'))
+                self.last_request_time = current_time
+            except Exception as e:
+                print(f"Failed to notify controller: {e}")
+                if self.controller_socket:
+                    self.controller_socket.close()
+                self.controller_socket = None
+                self.registered = False
+                self.registration_time = None
 
     def add_packet(self, request_id, seq_num, total_packets):
         with self.lock:
