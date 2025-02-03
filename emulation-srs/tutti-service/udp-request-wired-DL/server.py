@@ -220,27 +220,25 @@ class Server:
     def handle_request(self, data, client_address):
         try:
             # Unpack header: request_id, seq_num, total_packets, response_port, rnti_str, latency_req
-            header = struct.unpack('!IIII4sI', data[:24])  # Change to 24 bytes
+            header = struct.unpack('!IIII4sI', data[:24])
             request_id, seq_num, total_packets, response_port, rnti_bytes, latency_req = header
-            rnti_str = rnti_bytes.decode().strip()  # Convert bytes to string and remove padding
+            rnti_str = rnti_bytes.decode().strip()
+            
+            print(f"Received request: ID={request_id}, seq={seq_num}, total={total_packets}, RNTI={rnti_str}")
             
             client_key = (client_address[0], client_address[1])
             self.ue_last_active[client_key] = time.time()
-            
-            # Calculate total request size based on number of packets
-            payload_size = MAX_UDP_SIZE - 24  # Header size is 24 bytes
-            request_size = total_packets * payload_size
             
             # Handle registration packet (request_id = 0)
             if request_id == 0:
                 with self.tracker_lock:
                     if client_key not in self.ue_trackers:
-                        print(f"Registering new UE - RNTI: {rnti_str}, Response Port: {response_port}, Latency Req: {latency_req}ms, Request Size: {request_size} bytes")
+                        print(f"Registering new UE - RNTI: {rnti_str}, Response Port: {response_port}")
                         tracker = UETracker(
                             rnti_str=rnti_str,
                             client_port=response_port,
                             latency_req=latency_req,
-                            request_size=request_size,
+                            request_size=total_packets * (MAX_UDP_SIZE - 24),
                             controller_ip=self.controller_ip,
                             controller_port=self.controller_port
                         )
@@ -257,6 +255,7 @@ class Server:
                     # Send registration acknowledgment
                     response = struct.pack('!I4s', 0, rnti_str.encode().ljust(4))
                     self.socket.sendto(response, (self.response_ip, response_port))
+                    print(f"Sent registration confirmation to RNTI {rnti_str}")
                     return
             
             # Handle normal requests
@@ -267,15 +266,11 @@ class Server:
                 
                 tracker = self.ue_trackers[client_key]
             
-            # Only notify if already registered
-            if tracker.registered:
-                tracker.notify_request(request_id, seq_num)
-            
             # Process packet
             if tracker.add_packet(request_id, seq_num, total_packets):
                 response = struct.pack('!I4s', request_id, rnti_str.encode().ljust(4))
                 self.socket.sendto(response, (self.response_ip, tracker.client_port))
-                print(f"Completed request {request_id} from RNTI {rnti_str} ({total_packets} packets)")
+                print(f"Completed request {request_id} from RNTI {rnti_str}")
                 
         except Exception as e:
             print(f"Error handling request: {e}")

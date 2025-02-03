@@ -186,13 +186,18 @@ class UEClient:
 
     def _process_buffer(self, send_socket):
         """Process queued requests immediately"""
+        print(f"UE {self.rnti}: Buffer processing thread started")
+        
         while True:
             try:
                 # Get request from queue
                 try:
                     data, request_id = self.request_buffer.get(timeout=0.001)
+                    print(f"UE {self.rnti}: Processing request {request_id} from buffer")
                 except queue.Empty:
-                    if not self.inflight_requests and self.registration_complete.is_set():
+                    # Only exit if we've received start signal and no more requests
+                    if self.start_sending.is_set() and not self.inflight_requests and self.request_buffer.empty():
+                        print(f"UE {self.rnti}: No more requests to process, exiting buffer thread")
                         break
                     continue
 
@@ -200,24 +205,40 @@ class UEClient:
                 try:
                     send_socket.sendto(data, (self.server_ip, self.server_port))
                     self.stats['sent_requests'] += 1
-                    self.request_buffer.task_done()
+                    if request_id % 100 == 0:
+                        print(f"UE {self.rnti}: Successfully sent request {request_id}")
                 except Exception as e:
-                    print(f"Error sending request {request_id}: {e}")
+                    print(f"UE {self.rnti}: Error sending request {request_id}: {e}")
                     self.stats['failed_requests'] += 1
-                    try:
-                        self.request_buffer.put((data, request_id), timeout=0.1)
-                    except queue.Full:
-                        print(f"Failed to requeue request {request_id}")
+                finally:
+                    self.request_buffer.task_done()
 
             except Exception as e:
-                print(f"Error in buffer processing thread: {e}")
+                print(f"UE {self.rnti}: Error in buffer processing thread: {e}")
                 time.sleep(0.001)
+
+        print(f"UE {self.rnti}: Buffer processing thread finished. Total sent: {self.stats['sent_requests']}")
 
     def send_requests(self):
         try:
+            # Enter namespace before creating socket
             enter_netns(self.namespace)
+            print(f"UE {self.rnti}: Entered namespace {self.namespace}")
+            
+            # Create and configure socket
             send_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             send_socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024*1024*4)
+            print(f"UE {self.rnti}: Created socket with server {self.server_ip}:{self.server_port}")
+            
+            # Start buffer processing thread
+            buffer_thread = threading.Thread(
+                target=self._process_buffer,
+                args=(send_socket,),
+                daemon=True,
+                name=f"Buffer-{self.rnti}"
+            )
+            buffer_thread.start()
+            print(f"UE {self.rnti}: Started buffer processing thread")
             
             try:
                 # Send registration packet
@@ -265,8 +286,11 @@ class UEClient:
                     if request_id != self.num_requests:
                         time.sleep(self.interval / 1000.0)  # Sleep for specified interval
                 
-                # Wait for all requests to complete
+                print(f"UE {self.rnti}: All requests queued, waiting for buffer to empty")
                 self.request_buffer.join()
+                print(f"UE {self.rnti}: Buffer empty, waiting for buffer thread to finish")
+                buffer_thread.join(timeout=1.0)
+                print(f"UE {self.rnti}: Send complete. Sent: {self.stats['sent_requests']}, Failed: {self.stats['failed_requests']}")
                 
             except Exception as e:
                 print(f"Error queueing requests for UE {self.ue_id}: {e}")
