@@ -196,53 +196,59 @@ class UEClient:
             buffer_thread.daemon = True
             buffer_thread.start()
             
-            # Send registration packet (request_id = 0)
-            header = struct.pack('!IIII4sI', 
-                               0, 0,  # request_id = 0, seq_num = 0
-                               self.packets_per_request,
-                               self.listen_port,
-                               self.rnti.encode().ljust(4), # Ensure RNTI is 4 chars
-                               self.latency_req)
-            data = header + b'\0' * self.payload_size
-            self.request_buffer.put((data, 0))
-            
-            # Wait for registration to complete
-            print(f"UE {self.rnti}: Waiting for registration...")
-            if not self.registration_complete.wait(self.registration_timeout):
-                print(f"UE {self.rnti}: Registration timeout")
-                return
-            
-            print(f"UE {self.rnti}: Registration complete, starting requests")
-            
-            # Queue requests instead of sending directly
-            for request_id in range(1, self.num_requests + 1):
-                while len(self.inflight_requests) >= self.max_inflight:
-                    time.sleep(0.001)  # Wait if too many requests in flight
+            try:
+                # Send registration packet (request_id = 0)
+                header = struct.pack('!IIII4sI', 
+                                   0, 0,  # request_id = 0, seq_num = 0
+                                   self.packets_per_request,
+                                   self.listen_port,
+                                   self.rnti.encode().ljust(4),
+                                   self.latency_req)
+                data = header + b'\0' * self.payload_size
+                self.request_buffer.put((data, 0), timeout=1.0)
                 
-                with self.lock:
-                    self.send_times[request_id] = time.time()
-                    self.inflight_requests.add(request_id)
+                # Wait for registration to complete
+                print(f"UE {self.rnti}: Waiting for registration...")
+                if not self.registration_complete.wait(self.registration_timeout):
+                    print(f"UE {self.rnti}: Registration timeout")
+                    return
                 
-                for seq_num in range(self.packets_per_request):
-                    header = struct.pack('!IIII4sI', 
-                                       request_id, seq_num, 
-                                       self.packets_per_request,
-                                       self.listen_port,
-                                       self.rnti.encode().ljust(4),
-                                       self.latency_req)
-                    data = header + b'\0' * self.payload_size
-                    self.request_buffer.put((data, request_id))
+                print(f"UE {self.rnti}: Registration complete, starting requests")
                 
-                if request_id % 100 == 0:
-                    print(f"UE {self.rnti}: Queued request {request_id}")
-            
-            # Wait for all requests to complete
-            self.request_buffer.join()
-            buffer_thread.join()
+                # Queue requests
+                for request_id in range(1, self.num_requests + 1):
+                    while len(self.inflight_requests) >= self.max_inflight:
+                        time.sleep(0.001)
+                    
+                    with self.lock:
+                        self.send_times[request_id] = time.time()
+                        self.inflight_requests.add(request_id)
+                    
+                    for seq_num in range(self.packets_per_request):
+                        header = struct.pack('!IIII4sI', 
+                                           request_id, seq_num, 
+                                           self.packets_per_request,
+                                           self.listen_port,
+                                           self.rnti.encode().ljust(4),
+                                           self.latency_req)
+                        data = header + b'\0' * self.payload_size
+                        self.request_buffer.put((data, request_id), timeout=1.0)
+                    
+                    if request_id % 100 == 0:
+                        print(f"UE {self.rnti}: Queued request {request_id}")
+                
+                # Wait for buffer to empty
+                self.request_buffer.join()
+                
+            except Exception as e:
+                print(f"Error queueing requests for UE {self.ue_id}: {e}")
+                raise
             
         except Exception as e:
             print(f"Error in send loop for UE {self.ue_id}: {e}")
         finally:
+            # Wait a bit for buffer thread to finish
+            time.sleep(0.5)
             send_socket.close()
 
     def _process_buffer(self, send_socket):
@@ -250,26 +256,40 @@ class UEClient:
         last_send = 0
         while True:
             try:
-                data, request_id = self.request_buffer.get_nowait()
+                # Get item from queue with timeout
+                try:
+                    data, request_id = self.request_buffer.get(timeout=0.1)
+                except queue.Empty:
+                    # Check if we should exit
+                    if not self.inflight_requests and self.registration_complete.is_set():
+                        break
+                    continue
+
+                try:
+                    # Apply rate limiting
+                    now = time.time()
+                    if now - last_send < self.request_interval:
+                        time.sleep(self.request_interval - (now - last_send))
+                    
+                    send_socket.sendto(data, (self.server_ip, self.server_port))
+                    last_send = time.time()
+                    self.stats['sent_requests'] += 1
+                    
+                    # Only mark task as done if we successfully sent it
+                    self.request_buffer.task_done()
+                    
+                except Exception as e:
+                    print(f"Error processing request {request_id}: {e}")
+                    self.stats['failed_requests'] += 1
+                    # Put the request back in the queue for retry
+                    try:
+                        self.request_buffer.put((data, request_id), timeout=1.0)
+                    except queue.Full:
+                        print(f"Failed to requeue request {request_id}")
                 
-                # Apply rate limiting
-                now = time.time()
-                if now - last_send < self.request_interval:
-                    time.sleep(self.request_interval - (now - last_send))
-                
-                send_socket.sendto(data, (self.server_ip, self.server_port))
-                last_send = time.time()
-                self.stats['sent_requests'] += 1
-                
-            except queue.Empty:
-                if not self.inflight_requests:
-                    break  # No more requests to process
-                time.sleep(0.001)
             except Exception as e:
-                print(f"Error processing request {request_id}: {e}")
-                self.stats['failed_requests'] += 1
-            finally:
-                self.request_buffer.task_done()
+                print(f"Error in buffer processing thread: {e}")
+                time.sleep(0.1)  # Avoid tight loop on errors
 
     def receive_responses(self, result_dir):
         try:
