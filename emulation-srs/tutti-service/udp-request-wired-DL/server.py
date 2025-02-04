@@ -224,7 +224,7 @@ class Server:
             request_id, seq_num, total_packets, response_port, rnti_bytes, latency_req = header
             rnti_str = rnti_bytes.decode().strip()
             
-            print(f"Received request: ID={request_id}, seq={seq_num}, total={total_packets}, RNTI={rnti_str}")
+            # print(f"Received request: ID={request_id}, seq={seq_num}, total={total_packets}, RNTI={rnti_str}")
             
             client_key = (client_address[0], client_address[1])
             self.ue_last_active[client_key] = time.time()
@@ -270,7 +270,8 @@ class Server:
             if tracker.add_packet(request_id, seq_num, total_packets):
                 response = struct.pack('!I4s', request_id, rnti_str.encode().ljust(4))
                 self.socket.sendto(response, (self.response_ip, tracker.client_port))
-                print(f"Completed request {request_id} from RNTI {rnti_str}")
+                if request_id % 100 == 0:
+                    print(f"Completed request {request_id} from RNTI {rnti_str}")
                 
         except Exception as e:
             print(f"Error handling request: {e}")
