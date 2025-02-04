@@ -113,26 +113,17 @@ class UETracker:
         if self.registration_time and time.time() - self.registration_time < self.registration_wait:
             return
 
-        # Rate limit notifications to avoid overwhelming controller
-        current_time = time.time()
-        if seq_num == 0 and current_time - self.last_request_time >= 0.1:
-            msg = f"REQUEST|{self.rnti}|{request_id}"
-            try:
-                self.controller_socket.send(msg.encode('utf-8'))
-                self.last_request_time = current_time
-            except Exception as e:
-                print(f"Failed to notify controller: {e}")
-                if self.controller_socket:
-                    self.controller_socket.close()
-                self.controller_socket = None
-                self.registered = False
-                self.registration_time = None
-
-        # Add rate limiting
-        if current_time - self.last_controller_notify < self.notify_interval:
-            return
-        
-        self.last_controller_notify = current_time
+        # Send request notification to controller
+        msg = f"REQUEST|{self.rnti}|{request_id}"
+        try:
+            self.controller_socket.send(msg.encode('utf-8'))
+        except Exception as e:
+            print(f"Failed to notify controller: {e}")
+            if self.controller_socket:
+                self.controller_socket.close()
+            self.controller_socket = None
+            self.registered = False
+            self.registration_time = None
 
     def notify_request_completion(self, request_id):
         """Notify controller that a request is complete"""
@@ -284,6 +275,10 @@ class Server:
                     return
                 
                 tracker = self.ue_trackers[client_key]
+            
+            # Notify controller about new request when receiving first packet (seq_num = 0)
+            if seq_num == 0:
+                tracker.notify_request(request_id, seq_num)
             
             # Process packet
             if tracker.add_packet(request_id, seq_num, total_packets):
