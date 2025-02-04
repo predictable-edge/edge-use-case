@@ -59,6 +59,8 @@ class UETracker:
         # Add rate limiting
         self.last_controller_notify = 0
         self.notify_interval = 0.1  # 100ms minimum between notifications
+        
+        self.notify_request_complete = True  # Flag to enable DONE notifications
     
     def connect_to_controller(self):
         """Connect to the controller and register"""
@@ -132,6 +134,21 @@ class UETracker:
         
         self.last_controller_notify = current_time
 
+    def notify_request_completion(self, request_id):
+        """Notify controller that a request is complete"""
+        if not self.controller_socket or not self.registered:
+            return
+
+        try:
+            msg = f"DONE|{self.rnti}|{request_id}"
+            self.controller_socket.send(msg.encode('utf-8'))
+        except Exception as e:
+            print(f"Failed to notify request completion: {e}")
+            if self.controller_socket:
+                self.controller_socket.close()
+            self.controller_socket = None
+            self.registered = False
+
     def add_packet(self, request_id, seq_num, total_packets):
         with self.lock:
             # If this is a new request, store it
@@ -143,6 +160,8 @@ class UETracker:
             is_complete = len(self.packets[request_id]['received']) == total_packets
             
             if is_complete:
+                # Notify controller of request completion
+                self.notify_request_completion(request_id)
                 del self.packets[request_id]
                 self.current_request = None
             
