@@ -7,4 +7,5 @@ emulation-srs/figure
 yolo-use-case/video-track/figures
 yolo-use-case/video-track/results
 emulation-srs/tutti-service/result
+emulation-srs/pets-v1-service/result
 *.pt
