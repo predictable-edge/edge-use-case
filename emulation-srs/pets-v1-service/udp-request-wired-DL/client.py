@@ -291,7 +291,10 @@ class UEClient:
         completed_requests = {}
 
         try:
-            with open(latency_file, 'w') as f:
+            # Open file in append mode
+            with open(latency_file, 'a') as f:
+                # Write configuration header
+                f.write(f"\n\n=== Configuration: request_size={self.packets_per_request}, interval={self.interval} ===\n")
                 f.write(f"{'Request ID':<15}{'Latency (ms)':>15}\n")
                 next_request = 1
 
@@ -333,63 +336,87 @@ class MultiUEClient:
         """
         config_file: Path to JSON configuration file
         """
-        self.result_dir = os.path.join(
-            '../result/udp-request-wired-DL', 
-            datetime.now().strftime("%Y%m%d_%H%M%S")
-        )
-        
         # Load configurations from JSON file
         with open(config_file, 'r') as f:
             configs = json.load(f)
         
-        self.clients = []
+        # Create folder name from UE configurations
+        folder_name_parts = []
         for config in configs:
-            client = UEClient(
-                config=config,
-                server_ip=server_ip,
-                server_port=server_port
-            )
-            self.clients.append(client)
+            ue_part = f"{config['namespace']}-{config['request_size']}-{config['interval']}"
+            folder_name_parts.append(ue_part)
+        
+        folder_name = '-'.join(folder_name_parts)
+        # Add timestamp at the end
+        folder_name = f"{folder_name}-{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        
+        self.result_dir = os.path.join(
+            '../result/udp-request-wired-DL', 
+            folder_name
+        )
+        
+        # Group configurations by namespace
+        self.ue_configs = {}
+        for config in configs:
+            namespace = config['namespace']
+            if namespace not in self.ue_configs:
+                self.ue_configs[namespace] = []
+            self.ue_configs[namespace].append(config)
         
         # Small delay between starting clients
         self.start_delay = 0.5
+        self.server_ip = server_ip
+        self.server_port = server_port
 
-    def run(self):
-        """Run all UE clients independently"""
-        send_threads = []
-        recv_threads = []
-        
-        print("Starting receive threads...")
-        # Start receive threads first
-        for client in self.clients:
+    def run_ue_configs(self, configs):
+        """Run all configurations for a single UE sequentially"""
+        for config in configs:
+            print(f"Running configuration: {config['namespace']}-{config['request_size']}-{config['interval']}")
+            client = UEClient(
+                config=config,
+                server_ip=self.server_ip,
+                server_port=self.server_port
+            )
+            
+            # Start receive thread
             recv_thread = threading.Thread(
                 target=client.receive_responses,
                 args=(self.result_dir,)
             )
-            recv_threads.append(recv_thread)
             recv_thread.start()
             time.sleep(0.1)
-        
-        print("Starting send threads...")
-        # Start send threads with small delay between each
-        for client in self.clients:
+            
+            # Start send thread
             send_thread = threading.Thread(
                 target=client.send_requests
             )
-            send_threads.append(send_thread)
             send_thread.start()
+            
+            # Wait for both threads to complete before starting next config
+            send_thread.join()
+            recv_thread.join()
             time.sleep(self.start_delay)
+
+    def run(self):
+        """Run configurations for different UEs in parallel"""
+        ue_threads = []
         
-        print("Waiting for all threads to complete...")
-        # Wait for all threads to complete
-        for send_thread, recv_thread in zip(send_threads, recv_threads):
-            try:
-                send_thread.join()
-                recv_thread.join()
-            except Exception as e:
-                print(f"Error joining threads: {e}")
+        # Create thread for each UE to run its configs sequentially
+        for namespace, configs in self.ue_configs.items():
+            print(f"Starting configurations for {namespace}")
+            ue_thread = threading.Thread(
+                target=self.run_ue_configs,
+                args=(configs,)
+            )
+            ue_threads.append(ue_thread)
+            ue_thread.start()
+            time.sleep(0.1)  # Small delay between starting UEs
         
-        print("All threads completed")
+        # Wait for all UEs to complete
+        for ue_thread in ue_threads:
+            ue_thread.join()
+        
+        print("All configurations completed")
 
 def main():
     parser = argparse.ArgumentParser(description='Multi-UE UDP Client')
