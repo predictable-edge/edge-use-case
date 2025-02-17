@@ -139,20 +139,13 @@ class UEClient:
         self.ue_id = int(self.namespace[2:])
         self.rnti = None
         
-        # Header size and payload size
-        header_size = 28  # 5 ints + 1 string(4 chars)
-        self.payload_size = MAX_UDP_SIZE - header_size
+        self.payload_size = MAX_UDP_SIZE
+        self.packet_size = self.payload_size + 28
         
         self.send_times = {}
         self.lock = threading.Lock()
         self.registration_complete = threading.Event()
         self.registration_timeout = 5.0
-        
-        # Add message queue and controller thread
-        self.message_queue = queue.Queue()
-        self.controller_thread = threading.Thread(target=self.controller_message_worker)
-        self.controller_thread.daemon = True
-        self.controller_thread.start()
         
         # First initialize RNTI
         self.initialize_connection()
@@ -168,17 +161,13 @@ class UEClient:
             print(f"Failed to connect to controller: {e}")
             raise
 
-    def controller_message_worker(self):
-        """Worker thread to handle controller messages"""
-        while True:
-            try:
-                seq_number = self.message_queue.get()
-                message = f"Start|{self.rnti}|{seq_number}\n"
-                self.controller_socket.sendall(message.encode())
-            except Exception as e:
-                print(f"Error in controller message worker: {e}")
-            finally:
-                self.message_queue.task_done()
+    def send_controller_message(self, seq_number):
+        """Send message to controller"""
+        try:
+            message = f"Start|{self.rnti}|{seq_number}\n"
+            self.controller_socket.sendall(message.encode())
+        except Exception as e:
+            print(f"Error sending controller message: {e}")
 
     def initialize_connection(self):
         """Initialize RRC connection and get initial RNTI"""
@@ -203,13 +192,6 @@ class UEClient:
         # Just return the stored RNTI - no need to check repeatedly
         return self.rnti
 
-    def send_controller_message(self, seq_number):
-        """Queue message to controller"""
-        try:
-            self.message_queue.put(seq_number)
-        except Exception as e:
-            print(f"Error queuing controller message: {e}")
-
     def send_requests(self):
         try:
             # Enter namespace and create socket for UE communication
@@ -228,7 +210,7 @@ class UEClient:
                                    self.listen_port,
                                    self.rnti.encode().ljust(4),
                                    self.latency_req)
-                data = header + b'\0' * self.payload_size
+                data = header + b'\0' * self.packet_size
                 send_socket.sendto(data, (self.server_ip, self.server_port))
                 
                 print(f"UE {self.rnti}: Waiting for registration confirmation...")
@@ -273,8 +255,6 @@ class UEClient:
             print(f"Error in send loop for UE {self.ue_id}: {e}")
         finally:
             send_socket.close()
-            # Wait for all queued messages to be sent
-            self.message_queue.join()
             self.controller_socket.close()
 
     def receive_responses(self, result_dir):
