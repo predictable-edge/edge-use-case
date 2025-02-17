@@ -248,7 +248,7 @@ class Server:
                             rnti_str=rnti_str,
                             client_port=response_port,
                             latency_req=latency_req,
-                            request_size=total_packets * (MAX_UDP_SIZE - 24),
+                            request_size=total_packets * (MAX_UDP_SIZE + 28),
                             controller_ip=self.controller_ip,
                             controller_port=self.controller_port
                         )
