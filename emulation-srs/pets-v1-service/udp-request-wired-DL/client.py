@@ -296,7 +296,7 @@ class UEClient:
                         with self.lock:
                             if request_id in self.send_times:
                                 latency = (receive_time - self.send_times[request_id]) * 1000
-                                completed_requests[request_id] = min(latency, 300.0)
+                                completed_requests[request_id] = latency
                                 del self.send_times[request_id]
 
                         while next_request <= self.num_requests and next_request in completed_requests:
@@ -323,7 +323,7 @@ class MultiUEClient:
         # Create folder name from UE configurations
         folder_name_parts = []
         for config in configs:
-            ue_part = f"{config['namespace']}-{config['request_size']}-{config['interval']}"
+            ue_part = f"{config['namespace']}-{config['request_size']}-{config['interval']}-{config['latency_req']}"
             folder_name_parts.append(ue_part)
         
         folder_name = '-'.join(folder_name_parts)
