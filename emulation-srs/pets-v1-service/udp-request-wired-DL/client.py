@@ -117,11 +117,12 @@ class UEClient:
             'namespace': str,
             'listen_port': int,
             'num_requests': int,
-            'request_size': int,  # number of packets per request
+            'request_size': int,  # number of packets per request or file size in KB
             'interval': int,
             'latency_req': int,   # latency requirement in ms
             'controller_ip': str,
-            'controller_port': int
+            'controller_port': int,
+            'type': str           # 'latency' or 'file'
         }
         """
         self.namespace = config['namespace']
@@ -134,6 +135,12 @@ class UEClient:
         self.latency_req = config.get('latency_req', 100)
         self.controller_ip = config['controller_ip']
         self.controller_port = config['controller_port']
+        self.type = config.get('type', 'latency')  # Default to latency if not specified
+        
+        # For file transfer, use fixed port 20000
+        if self.type == 'file':
+            self.file_port = 20000  # Use fixed port 20000 for all file transfers
+            self.file_size_kb = self.packets_per_request  # In KB
         
         # Get UE ID from namespace name
         self.ue_id = int(self.namespace[2:])
@@ -146,20 +153,24 @@ class UEClient:
         self.lock = threading.Lock()
         self.registration_complete = threading.Event()
         self.registration_timeout = 5.0
+        self.result_dir = None
         
         # First initialize RNTI
         self.initialize_connection()
         
-        # Then initialize controller socket after we have RNTI
-        self.controller_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        try:
-            self.controller_socket.connect((self.controller_ip, self.controller_port))
-            print(f"Connected to controller at {self.controller_ip}:{self.controller_port}")
-            # Send an initial message to controller
-            self.send_controller_message(0)
-        except Exception as e:
-            print(f"Failed to connect to controller: {e}")
-            raise
+        # Only create controller socket for latency type
+        if self.type == 'latency':
+            self.controller_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                self.controller_socket.connect((self.controller_ip, self.controller_port))
+                print(f"Connected to controller at {self.controller_ip}:{self.controller_port}")
+                # Send an initial message to controller
+                self.send_controller_message(0)
+            except Exception as e:
+                print(f"Failed to connect to controller: {e}")
+                raise
+        else:
+            self.controller_socket = None
 
     def send_controller_message(self, seq_number):
         """Send message to controller"""
@@ -193,6 +204,14 @@ class UEClient:
         return self.rnti
 
     def send_requests(self):
+        """Choose the appropriate send method based on type"""
+        if self.type == 'file':
+            self.send_file_requests()
+        else:
+            self.send_latency_requests()
+    
+    def send_latency_requests(self):
+        """Original method for latency testing with UDP"""
         try:
             # Enter namespace and create socket for UE communication
             enter_netns(self.namespace)
@@ -255,9 +274,111 @@ class UEClient:
             print(f"Error in send loop for UE {self.ue_id}: {e}")
         finally:
             send_socket.close()
-            self.controller_socket.close()
+            if self.controller_socket:
+                self.controller_socket.close()
+                
+    def send_file_requests(self):
+        """Method for file transfer with TCP"""
+        try:
+            # Enter namespace and create socket for UE communication
+            enter_netns(self.namespace)
+            print(f"UE {self.rnti}: Entered namespace {self.namespace}")
+            
+            try:
+                # Send files
+                for request_id in range(1, self.num_requests + 1):
+                    # Create TCP socket for each file transfer
+                    file_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    file_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    
+                    try:
+                        # Connect to server's file port
+                        print(f"UE {self.rnti}: Connecting to server for file transfer at {self.server_ip}:{self.file_port}")
+                        file_socket.connect((self.server_ip, self.file_port))
+                        
+                        with self.lock:
+                            self.send_times[request_id] = time.time()
+                        
+                        # Send registration info: RNTI|request_id|file_size_kb|latency_req
+                        reg_info = f"{self.rnti}|{request_id}|{self.file_size_kb}|{self.latency_req}\n".encode()
+                        file_socket.sendall(reg_info)
+                        
+                        # Create file data (random bytes)
+                        file_data = b'\0' * (self.file_size_kb * 1024)  # Convert KB to bytes
+                        
+                        # Send file data
+                        bytes_sent = 0
+                        total_size = len(file_data)
+                        
+                        while bytes_sent < total_size:
+                            sent = file_socket.send(file_data[bytes_sent:bytes_sent + 4096])
+                            if sent == 0:
+                                raise RuntimeError("Socket connection broken")
+                            bytes_sent += sent
+                        
+                        # Wait for completion response
+                        response = file_socket.recv(1024).decode().strip()
+                        
+                        if response.startswith("DONE"):
+                            # Format: "DONE|request_id|time"
+                            parts = response.split('|')
+                            if len(parts) >= 3 and int(parts[1]) == request_id:
+                                receive_time = time.time()
+                                with self.lock:
+                                    if request_id in self.send_times:
+                                        latency = (receive_time - self.send_times[request_id]) * 1000
+                                        self.write_file_result(request_id, latency)
+                        
+                        if request_id % 10 == 0:
+                            print(f"UE {self.rnti}: Sent file {request_id}/{self.num_requests}")
+                        
+                    finally:
+                        file_socket.close()
+                    
+                    if request_id != self.num_requests:
+                        time.sleep(self.interval / 1000.0)
+                
+                print(f"UE {self.rnti}: All files sent")
+                
+            except Exception as e:
+                print(f"Error sending files for UE {self.ue_id}: {e}")
+                raise
+            
+        except Exception as e:
+            print(f"Error in file transfer loop for UE {self.ue_id}: {e}")
+        finally:
+            if self.controller_socket:
+                self.controller_socket.close()
+                
+    def write_file_result(self, request_id, latency):
+        """Write file transfer result to output file"""
+        if not self.result_dir:
+            print(f"Error: result_dir not set for UE {self.ue_id}")
+            return
+            
+        try:
+            os.makedirs(self.result_dir, exist_ok=True)
+            latency_file = os.path.join(self.result_dir, f'latency_rnti{self.ue_id}.txt')
+            
+            with open(latency_file, 'a') as f:
+                if request_id == 1:
+                    # Write configuration header for first request
+                    f.write(f"\n\n=== Configuration: file_size={self.file_size_kb}KB, interval={self.interval} ===\n")
+                    f.write(f"{'Request ID':<15}{'Latency (ms)':>15}\n")
+                
+                f.write(f"{request_id:<15}{latency:>15.2f}\n")
+                f.flush()
+        
+        except Exception as e:
+            print(f"Error writing file result for UE {self.ue_id}: {e}")
 
     def receive_responses(self, result_dir):
+        self.result_dir = result_dir
+        
+        # For file type, we don't need to receive UDP responses
+        if self.type == 'file':
+            return
+        
         try:
             recv_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             recv_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)

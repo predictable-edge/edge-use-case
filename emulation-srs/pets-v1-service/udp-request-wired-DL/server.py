@@ -6,6 +6,7 @@ from collections import defaultdict
 import time
 from queue import Queue
 import concurrent.futures
+import os
 
 MAX_UDP_SIZE = 1300
 HEADER_SIZE = 24    # 4 + 4 + 4 + 4 + 4 + 4 bytes
@@ -168,6 +169,112 @@ class UETracker:
             self.controller_socket = None
             self.registered = False
 
+class FileTransferHandler(threading.Thread):
+    """Handle file transfer for a single client connection"""
+    def __init__(self, client_socket, client_address):
+        super().__init__()
+        self.client_socket = client_socket
+        self.client_address = client_address
+        self.daemon = True
+
+    def run(self):
+        try:
+            # Wait for registration info from client
+            registration = self.client_socket.recv(1024).decode().strip()
+            if not registration:
+                print(f"Empty registration from {self.client_address}")
+                return
+                
+            # Parse registration: RNTI|request_id|file_size_kb|latency_req
+            try:
+                parts = registration.split('|')
+                if len(parts) < 4:
+                    print(f"Invalid registration format: {registration}")
+                    return
+                    
+                rnti = parts[0]
+                request_id = int(parts[1])
+                file_size_kb = int(parts[2])
+                latency_req = int(parts[3])
+                
+                # Calculate total file size in bytes
+                file_size_bytes = file_size_kb * 1024
+                
+                print(f"File transfer registration from RNTI {rnti}, request {request_id}, size {file_size_kb}KB")
+                
+                # Receive file data
+                bytes_received = 0
+                start_time = time.time()
+                
+                while bytes_received < file_size_bytes:
+                    buffer_size = min(4096, file_size_bytes - bytes_received)
+                    data = self.client_socket.recv(buffer_size)
+                    if not data:
+                        break
+                    bytes_received += len(data)
+                    
+                end_time = time.time()
+                transfer_time = (end_time - start_time) * 1000  # in ms
+                
+                print(f"Completed file transfer for RNTI {rnti}, request {request_id}: {bytes_received} bytes in {transfer_time:.2f}ms")
+                
+                # Send completion response
+                response = f"DONE|{request_id}|{end_time}\n"
+                self.client_socket.sendall(response.encode())
+                
+            except Exception as e:
+                print(f"Error processing file transfer: {e}")
+                self.client_socket.sendall(f"ERROR|{str(e)}\n".encode())
+                
+        except Exception as e:
+            print(f"Error in file transfer handler: {e}")
+        finally:
+            self.client_socket.close()
+
+class FileServer(threading.Thread):
+    """TCP server for file transfers"""
+    def __init__(self, base_port):
+        super().__init__()
+        self.base_port = base_port  # e.g., 20000
+        self.running = True
+        self.daemon = True
+        
+        # Create the listening socket
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.socket.bind(('', self.base_port))
+        self.socket.listen(5)
+        
+        print(f"File server listening on port {self.base_port}")
+
+    def run(self):
+        try:
+            while self.running:
+                try:
+                    client_socket, client_address = self.socket.accept()
+                    print(f"Accepted file transfer connection from {client_address}")
+                    
+                    # Create a handler thread for this client
+                    handler = FileTransferHandler(client_socket, client_address)
+                    handler.start()
+                    
+                except Exception as e:
+                    if self.running:
+                        print(f"Error accepting file transfer connection: {e}")
+                    time.sleep(0.1)
+                    
+        except Exception as e:
+            print(f"Error in file server: {e}")
+        finally:
+            self.socket.close()
+            
+    def stop(self):
+        self.running = False
+        try:
+            self.socket.close()
+        except:
+            pass
+
 class Server:
     def __init__(self, listen_port, response_ip, controller_ip, controller_port):
         self.listen_port = listen_port
@@ -198,6 +305,10 @@ class Server:
         # Start worker threads
         for _ in range(self.num_workers):
             self.worker_pool.submit(self._process_request_queue)
+            
+        # Start file server for TCP transfers (no controller communication)
+        self.file_server = FileServer(base_port=20000)  # Use port 20000 as the base port
+        self.file_server.start()
     
     def _cleanup_inactive_ues(self):
         """Periodically clean up inactive UE trackers"""
@@ -293,7 +404,7 @@ class Server:
     def run(self):
         try:
             self.socket.bind(('', self.listen_port))
-            print(f"Server listening on port {self.listen_port}")
+            print(f"UDP Server listening on port {self.listen_port}")
             print(f"Sending responses to IP {self.response_ip}")
             
             while True:
@@ -306,6 +417,7 @@ class Server:
         finally:
             self.worker_pool.shutdown(wait=True)
             self.socket.close()
+            self.file_server.stop()
             for tracker in self.ue_trackers.values():
                 tracker.cleanup()
 
