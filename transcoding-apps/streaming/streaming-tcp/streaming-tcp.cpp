@@ -515,16 +515,23 @@ void* pull_stream(void* args) {
 
     avformat_network_init();
 
-    AVFormatContext* input_fmt_ctx = NULL;
-    AVDictionary* options = NULL;
-    
+    AVFormatContext* input_fmt_ctx = nullptr;
+    int ret = 0;
 
-    if (strncmp(input_url, "udp://", 6) == 0) {
-        av_dict_set(&options, "timeout", "5000000", 0);
+    AVDictionary* options = nullptr;
+
+    ret = avformat_open_input(&input_fmt_ctx, input_url, nullptr, &options);
+    if (ret < 0) {
+        pthread_mutex_lock(&cout_mutex);
+        char errbuf[AV_ERROR_MAX_STRING_SIZE];
+        av_strerror(ret, errbuf, sizeof(errbuf));
+        std::cerr << "[Pull Thread " << index << "] Could not open input: " << errbuf << std::endl;
+        pthread_mutex_unlock(&cout_mutex);
+
+        av_dict_free(&options);
+        avformat_network_deinit();
+        return nullptr;
     }
-    
-    int ret = avformat_open_input(&input_fmt_ctx, input_url, NULL, &options);
-    CHECK_ERR(ret, "Could not open input URL");
 
     ret = avformat_find_stream_info(input_fmt_ctx, nullptr);
     if (ret < 0) {
@@ -725,13 +732,7 @@ void* push_stream_directly(void* args) {
     pthread_mutex_unlock(&cout_mutex);
 
     AVFormatContext* input_fmt_ctx = NULL;
-    AVDictionary* options = NULL;
-    
-    if (strncmp(input_filename, "udp://", 6) == 0) {
-        av_dict_set(&options, "timeout", "5000000", 0);
-    }
-    
-    int ret = avformat_open_input(&input_fmt_ctx, input_filename, NULL, &options);
+    int ret = avformat_open_input(&input_fmt_ctx, input_filename, NULL, NULL);
     CHECK_ERR(ret, "Could not open input file for push_stream");
 
     ret = avformat_find_stream_info(input_fmt_ctx, NULL);
