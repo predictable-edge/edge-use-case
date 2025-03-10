@@ -829,7 +829,7 @@ int main(int argc, char* argv[]) {
         config.width = resolution_bitrate_log[i].width;
         config.height = resolution_bitrate_log[i].height;
         config.bitrate = resolution_bitrate_log[i].bitrate_kbps;
-        config.log_filename = "task" + std::to_string(num_outputs) + "/" + get_timestamp_with_ms() + "/"
+        config.log_filename = "result/task" + std::to_string(num_outputs) + "/" + get_timestamp_with_ms() + "/"
                               + resolution_bitrate_log[i].log_filename + ".log";
         config.framerate = decoder_info.input_framerate;
         encoder_configs.push_back(config);
