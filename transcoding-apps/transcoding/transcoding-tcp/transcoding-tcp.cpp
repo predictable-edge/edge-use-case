@@ -261,7 +261,7 @@ bool initialize_decoder(const char* input_url, DecoderInfo& decoder_info) {
     }
 
     // Find decoder
-    AVCodec* decoder = avcodec_find_decoder(codecpar->codec_id);
+    const AVCodec* decoder = avcodec_find_decoder(codecpar->codec_id);
     if (!decoder) {
         std::cerr << "Could not find decoder for the video stream" << std::endl;
         avformat_close_input(&decoder_info.input_fmt_ctx);
@@ -460,7 +460,7 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
     }
 
     // Find encoder for H.264
-    AVCodec* encoder = avcodec_find_encoder(AV_CODEC_ID_H264);
+    const AVCodec* encoder = avcodec_find_encoder(AV_CODEC_ID_H264);
     if (!encoder) {
         std::cerr << "Necessary encoder not found" << std::endl;
         avformat_free_context(output_fmt_ctx);
