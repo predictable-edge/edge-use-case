@@ -9,3 +9,4 @@ yolo-use-case/video-track/results
 emulation-srs/tutti-service/result
 emulation-srs/pets-v1-service/result
 *.pt
+*.log
