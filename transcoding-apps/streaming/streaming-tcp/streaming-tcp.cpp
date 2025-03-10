@@ -504,7 +504,7 @@ void* pull_stream(void* args) {
 
     // Create a TimingLogger instance for this pull thread
     std::stringstream ss;
-    ss <<  "~/edge-use-case/streaming-apps/streaming-tcp/task" << num_pull << "/" << get_timestamp_with_ms() << "/"
+    ss <<  "task" << num_pull << "/" << get_timestamp_with_ms() << "/"
        << "frame-" << index << ".log"; 
     std::string log_filename = ss.str();
     TimingLogger logger(log_filename);
