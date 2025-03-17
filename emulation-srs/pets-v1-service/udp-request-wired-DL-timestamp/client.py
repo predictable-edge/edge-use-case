@@ -178,6 +178,16 @@ class UEClient:
                 raise
         else:
             self.controller_socket = None
+            
+        # Periodic handshake parameters
+        self.last_handshake_time = time.time()
+        self.handshake_interval = config.get("handshake_interval", 30.0)  # Perform handshake every 30 seconds
+        self.handshake_socket = None
+        
+        # New: Add handshake thread control
+        self.handshake_running = False
+        self.handshake_thread = None
+        self.handshake_stop_event = threading.Event()
 
     def send_controller_message(self, seq_number):
         """Send message to controller"""
@@ -274,6 +284,9 @@ class UEClient:
             send_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             print(f"UE {self.rnti}: Created socket with server {self.server_ip}:{self.server_port}")
             
+            # Save the socket for later periodic handshakes
+            self.handshake_socket = send_socket
+            
             try:
                 # Send registration packet
                 print(f"UE {self.rnti}: Sending registration packet...")
@@ -283,7 +296,7 @@ class UEClient:
                                    self.listen_port,
                                    self.rnti.encode().ljust(4),
                                    self.latency_req)
-                data = header + b'\0' * self.packet_size
+                data = header + b'\0' * self.payload_size
                 send_socket.sendto(data, (self.server_ip, self.server_port))
                 
                 print(f"UE {self.rnti}: Waiting for registration confirmation...")
@@ -293,54 +306,70 @@ class UEClient:
                 
                 print(f"UE {self.rnti}: Registration confirmed")
                 
-                # Perform handshake process after registration
+                # Perform initial handshake process after registration - this one is blocking
                 if not self.perform_handshake(send_socket):
-                    print(f"UE {self.rnti}: Failed to complete handshake, continuing anyway...")
+                    print(f"UE {self.rnti}: Failed to complete initial handshake, continuing anyway...")
+                else:
+                    print(f"UE {self.rnti}: Initial handshake successful")
+                
+                # Start background handshake thread for periodic handshakes
+                self.start_handshake_thread(send_socket)
                 
                 print(f"UE {self.rnti}: Starting requests...")
                 time.sleep(1)  # Short delay before starting requests
                 
                 # Send requests
                 for request_id in range(1, self.num_requests + 1):
-                    timestamp_c1 = time.time()  # Record send time for this request
+                    start_time = time.time()
                     
                     with self.lock:
-                        self.send_times[request_id] = timestamp_c1
+                        self.send_times[request_id] = start_time
                     
-                    # First send controller message before sending any UDP packets
+                    # Send controller message before sending any UDP packets
                     self.send_controller_message(request_id)
                     
+                    # Send all packets for the request
                     for seq_num in range(self.packets_per_request):
-                        # Include timestamp in the header
+                        # Add timestamp to request
+                        timestamp_c1 = time.time()
+                        
                         header = struct.pack('!IIII4sId', 
-                                          request_id, seq_num, 
-                                          self.packets_per_request,
-                                          self.listen_port,
-                                          self.rnti.encode().ljust(4),
-                                          self.latency_req,
-                                          timestamp_c1)
+                                           request_id, seq_num, 
+                                           self.packets_per_request,
+                                           self.listen_port,
+                                           self.rnti.encode().ljust(4),
+                                           self.latency_req,
+                                           timestamp_c1)
+                                           
                         data = header + b'\0' * self.payload_size
                         send_socket.sendto(data, (self.server_ip, self.server_port))
                     
                     if request_id % 100 == 0:
                         print(f"UE {self.rnti}: Sent request {request_id}")
                     
-                    if request_id != self.num_requests:
-                        time.sleep(self.interval / 1000.0)
+                    # Sleep until the next request interval
+                    elapsed = time.time() - start_time
+                    if elapsed < self.interval and request_id < self.num_requests:
+                        time.sleep(self.interval - elapsed)
                 
-                print(f"UE {self.rnti}: All requests sent")
+                print(f"UE {self.rnti}: Completed all {self.num_requests} requests")
                 
-            except Exception as e:
-                print(f"Error sending requests for UE {self.ue_id}: {e}")
-                raise
-            
+                # Wait for any outstanding responses
+                time.sleep(2)
+                
+            finally:
+                # Stop the handshake thread before closing socket
+                self.stop_handshake_thread()
+                send_socket.close()
+                self.handshake_socket = None
+                
         except Exception as e:
-            print(f"Error in send loop for UE {self.ue_id}: {e}")
-        finally:
-            send_socket.close()
-            if self.controller_socket:
-                self.controller_socket.close()
-                
+            print(f"UE {self.rnti}: Request error: {e}")
+            self.stop_handshake_thread()
+            if self.handshake_socket:
+                self.handshake_socket.close()
+                self.handshake_socket = None
+
     def send_file_requests(self):
         """Method for file transfer with TCP"""
         try:
@@ -524,7 +553,7 @@ class UEClient:
                                     print(f"UE {self.rnti}: Server acknowledged RTT")
                                 
                                 continue
-                        
+                            
                         # Process regular response packet
                         if len(data) < 9:  # Basic validation for normal packets
                             continue
@@ -611,6 +640,74 @@ class UEClient:
 
         finally:
             recv_socket.close()
+
+    def check_handshake_needed(self):
+        """Check if it's time to perform a new handshake based on time interval"""
+        current_time = time.time()
+        if current_time - self.last_handshake_time >= self.handshake_interval:
+            print(f"UE {self.rnti}: Time for periodic handshake after {self.handshake_interval:.1f} seconds")
+            return True
+        return False
+
+    def perform_periodic_handshake(self, socket):
+        """Perform a periodic handshake to reset timing reference"""
+        if not self.check_handshake_needed():
+            return False
+            
+        # Reset handshake flags
+        self.handshake_complete.clear()
+        
+        # Perform the actual handshake
+        success = self.perform_handshake(socket)
+        
+        if success:
+            # Update the last handshake time
+            self.last_handshake_time = time.time()
+            print(f"UE {self.rnti}: Periodic handshake completed, timing reference updated")
+        
+        return success
+
+    def handshake_thread_func(self):
+        """Background thread function for periodic handshakes"""
+        print(f"UE {self.rnti}: Started periodic handshake thread")
+        
+        while not self.handshake_stop_event.is_set():
+            # Check if it's time for a handshake
+            if self.check_handshake_needed() and self.handshake_socket:
+                print(f"UE {self.rnti}: Performing periodic handshake in background thread")
+                self.perform_periodic_handshake(self.handshake_socket)
+            
+            # Sleep for a short time before checking again
+            # Use shorter interval than handshake_interval to be responsive
+            sleep_time = min(5.0, self.handshake_interval / 6)
+            
+            # Use wait with timeout to allow early termination
+            if self.handshake_stop_event.wait(timeout=sleep_time):
+                break
+                
+        print(f"UE {self.rnti}: Periodic handshake thread stopped")
+    
+    def start_handshake_thread(self, socket):
+        """Start the background thread for periodic handshakes"""
+        if not self.handshake_running:
+            self.handshake_socket = socket
+            self.handshake_stop_event.clear()
+            self.handshake_thread = threading.Thread(
+                target=self.handshake_thread_func,
+                daemon=True
+            )
+            self.handshake_running = True
+            self.handshake_thread.start()
+            print(f"UE {self.rnti}: Started periodic handshake monitoring")
+    
+    def stop_handshake_thread(self):
+        """Stop the background handshake thread"""
+        if self.handshake_running:
+            self.handshake_stop_event.set()
+            if self.handshake_thread:
+                self.handshake_thread.join(timeout=1.0)
+            self.handshake_running = False
+            print(f"UE {self.rnti}: Stopped periodic handshake monitoring")
 
 class MultiUEClient:
     def __init__(self, config_file, server_ip, server_port):
