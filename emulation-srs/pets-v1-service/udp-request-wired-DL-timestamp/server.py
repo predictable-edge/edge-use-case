@@ -362,13 +362,22 @@ class Server:
                     timestamp_s0 = time.time()
                     print(f"Server: Received handshake from RNTI {rnti_str}, timestamp_c0={timestamp_c0}")
                     
+                    registered_client_port = None
+                    with self.tracker_lock:
+                        for existing_key, existing_tracker in self.ue_trackers.items():
+                            if existing_tracker.rnti == rnti_str:
+                                registered_client_port = existing_tracker.client_port
+                                print(f"Server: Found registered UE - RNTI: {rnti_str}, Response Port: {registered_client_port}")
+                                break
+                    
                     with self.tracker_lock:
                         if client_key not in self.ue_trackers:
                             # Create a new tracker for this UE if not exists
-                            print(f"Server: Creating new tracker for RNTI {rnti_str} during handshake")
+                            client_port = registered_client_port if registered_client_port is not None else client_address[1]
+                            print(f"Server: Creating new tracker for RNTI {rnti_str} during handshake with port {client_port}")
                             tracker = UETracker(
                                 rnti_str=rnti_str,
-                                client_port=client_address[1],  # Use source port as client port
+                                client_port=client_port,
                                 latency_req=100,  # Default value
                                 request_size=0,   # Will be updated later
                                 controller_ip=self.controller_ip,
@@ -382,7 +391,7 @@ class Server:
                     
                     # Send response without server timestamp
                     response = struct.pack('!4sI4s', b'HSHK', 2, rnti_str.encode().ljust(4))
-                    self.socket.sendto(response, (self.response_ip, client_address[1]))
+                    self.socket.sendto(response, (self.response_ip, tracker.client_port))
                     print(f"Server: Sent handshake response to RNTI {rnti_str}")
                     return
                     
@@ -403,7 +412,7 @@ class Server:
                     
                     # Acknowledge RTT received
                     response = struct.pack('!4sI4s', b'HSHK', 4, rnti_str.encode().ljust(4))
-                    self.socket.sendto(response, (self.response_ip, client_address[1]))
+                    self.socket.sendto(response, (self.response_ip, tracker.client_port))
                     print(f"Server: Sent RTT acknowledgment to RNTI {rnti_str}")
                     return
             
