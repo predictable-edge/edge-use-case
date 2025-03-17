@@ -1,0 +1,79 @@
+[
+    {
+        "namespace": "ue1",
+        "listen_port": 10001,
+        "num_requests": 2400,
+        "request_size": 30,
+        "interval": 16,
+        "latency_req": 50,
+        "controller_ip": "192.168.0.12",
+        "controller_port": 5557,
+        "type": "latency"
+    },
+    {
+        "namespace": "ue2",
+        "listen_port": 10002,
+        "num_requests": 40,
+        "request_size": 300,
+        "interval": 1000,
+        "latency_req": 10000,
+        "controller_ip": "192.168.0.12",
+        "controller_port": 5557,
+        "type": "file"
+    },
+    {
+        "namespace": "ue3",
+        "listen_port": 10003,
+        "num_requests": 20,
+        "request_size": 600,
+        "interval": 2000,
+        "latency_req": 10000,
+        "controller_ip": "192.168.0.12",
+        "controller_port": 5557,
+        "type": "file"
+    },
+    {
+        "namespace": "ue4",
+        "listen_port": 10004,
+        "num_requests": 40,
+        "request_size": 300,
+        "interval": 1000,
+        "latency_req": 10000,
+        "controller_ip": "192.168.0.12",
+        "controller_port": 5557,
+        "type": "file"
+    },
+    {
+        "namespace": "ue5",
+        "listen_port": 10005,
+        "num_requests": 20,
+        "request_size": 600,
+        "interval": 2000,
+        "latency_req": 10000,
+        "controller_ip": "192.168.0.12",
+        "controller_port": 5557,
+        "type": "file"
+    },
+    {
+        "namespace": "ue6",
+        "listen_port": 10006,
+        "num_requests": 40,
+        "request_size": 300,
+        "interval": 1000,
+        "latency_req": 10000,
+        "controller_ip": "192.168.0.12",
+        "controller_port": 5557,
+        "type": "file"
+    },
+    {
+        "namespace": "ue7",
+        "listen_port": 10007,
+        "num_requests": 20,
+        "request_size": 600,
+        "interval": 2000,
+        "latency_req": 10000,
+        "controller_ip": "192.168.0.12",
+        "controller_port": 5557,
+        "type": "file"
+    }
+]
