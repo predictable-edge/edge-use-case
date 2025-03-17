@@ -68,6 +68,11 @@ class UETracker:
         self.timestamp_c0 = 0        # Client timestamp from first handshake
         self.t1 = 0                  # RTT value from client
         self.request_timestamps = {} # Dictionary to store timestamps for each request
+        
+        # New: Previous delay calculation results and timestamps
+        self.last_delay = 0          # Last calculated transmission delay
+        self.last_timestamp_s = 0    # Last server timestamp
+        self.last_timestamp_c = 0    # Last client timestamp
     
     def connect_to_controller(self):
         """Connect to the controller and register"""
@@ -485,11 +490,40 @@ class Server:
                     transmission_delay = 0
                     with self.tracker_lock:
                         if tracker.timestamp_s0 > 0 and timestamp_c1 > 0 and tracker.timestamp_c0 > 0 and tracker.t1 > 0:
-                            # Use the specified formula: t2 = t1 + (timestamp_s1-timestamp_s0) - (timestamp_c1-timestamp_c0)
-                            time_diff_server = timestamp_s1 - tracker.timestamp_s0
-                            time_diff_client = timestamp_c1 - tracker.timestamp_c0
-                            transmission_delay = tracker.t1 + (time_diff_server - time_diff_client)
-                            print(f"Server: Calculated delay for RNTI {rnti_str}, request {request_id}: {transmission_delay*1000:.2f}ms")
+                            # Check if previous delay calculation results are available
+                            if tracker.last_delay > 0 and tracker.last_timestamp_s > 0 and tracker.last_timestamp_c > 0:
+                                # Use true chain calculation method: based on previous delay and timestamp differences
+                                server_time_diff = timestamp_s1 - tracker.last_timestamp_s
+                                client_time_diff = timestamp_c1 - tracker.last_timestamp_c
+                                clock_offset_adjustment = server_time_diff - client_time_diff
+                                
+                                # Calculate new delay based on previous delay
+                                transmission_delay = tracker.last_delay + clock_offset_adjustment
+                                
+                                print(f"Server: Calculated delay for RNTI {rnti_str}, request {request_id} (CHAIN mode): {transmission_delay*1000:.2f}ms")
+                                print(f"  - Previous delay: {tracker.last_delay*1000:.2f}ms")
+                                print(f"  - Server time diff from last: {server_time_diff*1000:.2f}ms")
+                                print(f"  - Client time diff from last: {client_time_diff*1000:.2f}ms")
+                                print(f"  - Clock offset adjustment: {clock_offset_adjustment*1000:.2f}ms")
+                            else:
+                                # First calculation or previous result invalid, use base calculation method
+                                server_time_diff = timestamp_s1 - tracker.timestamp_s0
+                                client_time_diff = timestamp_c1 - tracker.timestamp_c0
+                                clock_offset_adjustment = server_time_diff - client_time_diff
+                                
+                                # Calculate initial delay based on RTT value
+                                transmission_delay = tracker.t1 + clock_offset_adjustment
+                                
+                                print(f"Server: Calculated delay for RNTI {rnti_str}, request {request_id} (BASE mode): {transmission_delay*1000:.2f}ms")
+                                print(f"  - RTT: {tracker.t1*1000:.2f}ms")
+                                print(f"  - Server time diff: {server_time_diff*1000:.2f}ms")
+                                print(f"  - Client time diff: {client_time_diff*1000:.2f}ms")
+                                print(f"  - Clock offset adjustment: {clock_offset_adjustment*1000:.2f}ms")
+                            
+                            # Update previous calculation results and timestamps
+                            tracker.last_delay = transmission_delay
+                            tracker.last_timestamp_s = timestamp_s1
+                            tracker.last_timestamp_c = timestamp_c1
                         else:
                             missing = []
                             if tracker.timestamp_s0 <= 0: missing.append("s0")
