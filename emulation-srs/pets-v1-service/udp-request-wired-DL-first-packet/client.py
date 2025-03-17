@@ -469,7 +469,7 @@ class MultiUEClient:
         folder_name = f"{folder_name}-{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         
         self.result_dir = os.path.join(
-            '../result/udp-request-wired-DL', 
+            '../result/udp-request-wired-DL-first-packet', 
             folder_name
         )
         
