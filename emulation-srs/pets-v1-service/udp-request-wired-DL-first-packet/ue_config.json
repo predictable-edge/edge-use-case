@@ -1,0 +1,24 @@
+[
+    {
+        "namespace": "ue1",
+        "listen_port": 10001,
+        "num_requests": 1000,
+        "request_size": 30,
+        "interval": 16,
+        "latency_req": 50,
+        "controller_ip": "192.168.0.12",
+        "controller_port": 5557,
+        "type": "latency"
+    },
+    {
+        "namespace": "ue2",
+        "listen_port": 10002,
+        "num_requests": 2,
+        "request_size": 10240,
+        "interval": 1,
+        "latency_req": 10000,
+        "controller_ip": "192.168.0.12",
+        "controller_port": 5557,
+        "type": "file"
+    }
+]
