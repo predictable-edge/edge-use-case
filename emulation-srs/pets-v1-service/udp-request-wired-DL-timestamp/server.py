@@ -476,31 +476,7 @@ class Server:
                 # Notify controller about new request when receiving first packet (seq_num = 0)
                 if seq_num == 0:
                     tracker.notify_request(request_id, seq_num)
-                    
-                    # Calculate transmission delay for this request
-                    transmission_delay = 0
-                    with self.tracker_lock:
-                        if tracker.timestamp_s0 > 0 and timestamp_c1 > 0 and tracker.timestamp_c0 > 0 and tracker.t1 > 0:
-                            # Use the specified formula: t2 = t1 + (timestamp_s1-timestamp_s0) - (timestamp_c1-timestamp_c0)
-                            time_diff_server = timestamp_s1 - tracker.timestamp_s0
-                            time_diff_client = timestamp_c1 - tracker.timestamp_c0
-                            transmission_delay = tracker.t1 + (time_diff_server - time_diff_client)
-                            print(f"Server: Calculated delay for RNTI {rnti_str}, request {request_id}:")
-                            print(f"  t1 (RTT): {tracker.t1*1000:.2f}ms")
-                            print(f"  s1-s0 (server diff): {time_diff_server*1000:.2f}ms")
-                            print(f"  c1-c0 (client diff): {time_diff_client*1000:.2f}ms")
-                            print(f"  Result: {transmission_delay*1000:.2f}ms")
-                        else:
-                            missing = []
-                            if tracker.timestamp_s0 <= 0: missing.append("s0")
-                            if timestamp_c1 <= 0: missing.append("c1")
-                            if tracker.timestamp_c0 <= 0: missing.append("c0")
-                            if tracker.t1 <= 0: missing.append("t1")
-                            print(f"Server: Cannot calculate delay for RNTI {rnti_str}, request {request_id}. Missing: {', '.join(missing)}")
-                            print(f"  s0: {tracker.timestamp_s0}, c0: {tracker.timestamp_c0}, c1: {timestamp_c1}, t1: {tracker.t1}")
-                    
-                    # Send response for first packet with transmission delay information
-                    response = struct.pack('!I4sBd', request_id, rnti_str.encode().ljust(4), 1, transmission_delay)  # 1 indicates first packet response
+                    response = struct.pack('!I4sB', request_id, rnti_str.encode().ljust(4), 1)  # 1 indicates first packet response
                     self.socket.sendto(response, (self.response_ip, tracker.client_port))
                 
                 # Process packet
@@ -513,15 +489,14 @@ class Server:
                             time_diff_server = timestamp_s1 - tracker.timestamp_s0
                             time_diff_client = timestamp_c1 - tracker.timestamp_c0
                             transmission_delay = tracker.t1 + (time_diff_server - time_diff_client)
-                            print(f"Server: Calculated final delay for RNTI {rnti_str}, request {request_id}: {transmission_delay*1000:.2f}ms")
+                            print(f"Server: Calculated delay for RNTI {rnti_str}, request {request_id}: {transmission_delay*1000:.2f}ms")
                         else:
                             missing = []
                             if tracker.timestamp_s0 <= 0: missing.append("s0")
                             if timestamp_c1 <= 0: missing.append("c1")
                             if tracker.timestamp_c0 <= 0: missing.append("c0")
                             if tracker.t1 <= 0: missing.append("t1")
-                            print(f"Server: Cannot calculate final delay for RNTI {rnti_str}, request {request_id}. Missing: {', '.join(missing)}")
-                            print(f"  s0: {tracker.timestamp_s0}, c0: {tracker.timestamp_c0}, c1: {timestamp_c1}, t1: {tracker.t1}")
+                            print(f"Server: Cannot calculate delay for RNTI {rnti_str}, request {request_id}. Missing: {', '.join(missing)}")
                     
                     response = struct.pack('!I4sBd', request_id, rnti_str.encode().ljust(4), 2, transmission_delay)  # 2 indicates complete request response
                     self.socket.sendto(response, (self.response_ip, tracker.client_port))

@@ -524,7 +524,7 @@ class UEClient:
                         if len(data) < 9:  # Basic validation for normal packets
                             continue
                             
-                        # Check if this is an enhanced response with delay data
+                        # Check if this is an enhanced response with delay data (for complete request)
                         if len(data) >= 17:  # Header + delay data
                             request_id, rnti_bytes, response_type, server_delay = struct.unpack('!I4sBd', data[:17])
                             recv_rnti = rnti_bytes.decode().strip()
@@ -540,39 +540,61 @@ class UEClient:
                             receive_time = time.time()
                             with self.lock:
                                 if request_id in self.send_times:
-                                    if response_type == 1:  # First packet response
-                                        first_packet_times[request_id] = (receive_time - self.send_times[request_id]) * 1000
-                                        # Store server inferred delay
-                                        self.server_delays[request_id] = server_delay * 1000  # Convert to ms
-                                    elif response_type == 2:  # Complete request response
+                                    if response_type == 2:  # Complete request response
                                         total_latency = (receive_time - self.send_times[request_id]) * 1000
                                         completed_requests[request_id] = total_latency
                                         
-                                        # Write to delay comparison file
-                                        if request_id in self.server_delays:
-                                            dc.write(f"{request_id:<10}{total_latency:>15.2f}{self.server_delays[request_id]:>30.2f}\n")
-                                            dc.flush()
-                                            
+                                        # 记录服务器计算的延迟
+                                        self.server_delays[request_id] = server_delay * 1000  # Convert to ms
+                                        
+                                        # 写入延迟比较文件
+                                        dc.write(f"{request_id:<10}{total_latency:>15.2f}{self.server_delays[request_id]:>30.2f}\n")
+                                        dc.flush()
+                                        
+                                        # 写入第一个包和总延迟到first_packet_file
+                                        if request_id in first_packet_times:
+                                            fp.write(f"{request_id:<15}{first_packet_times[request_id]:>25.2f}{total_latency:>20.2f}\n")
+                                            fp.flush()
+                                            del first_packet_times[request_id]
+                                        
                                         del self.send_times[request_id]
                         else:
+                            if len(data) >= 9:  # Header + response_type
+                                request_id, rnti_bytes, response_type = struct.unpack('!I4sB', data[:9])
+                                recv_rnti = rnti_bytes.decode().strip()
+                                
+                                if recv_rnti != self.rnti:
+                                    continue
+                                
+                                # Mark registration as complete when receiving response to request_id 0
+                                if request_id == 0:
+                                    self.registration_complete.set()
+                                    continue
+                                
+                                if response_type == 1:  # First packet response
+                                    receive_time = time.time()
+                                    with self.lock:
+                                        if request_id in self.send_times:
+                                            first_packet_times[request_id] = (receive_time - self.send_times[request_id]) * 1000
                             # Process legacy response format
-                            request_id, rnti_bytes = struct.unpack('!I4s', data[:8])
-                            recv_rnti = rnti_bytes.decode().strip()
-                            
-                            if recv_rnti != self.rnti:
-                                continue
+                            else:
+                                request_id, rnti_bytes = struct.unpack('!I4s', data[:8])
+                                recv_rnti = rnti_bytes.decode().strip()
+                                
+                                if recv_rnti != self.rnti:
+                                    continue
 
-                            # Mark registration as complete when receiving response to request_id 0
-                            if request_id == 0:
-                                self.registration_complete.set()
-                                continue
+                                # Mark registration as complete when receiving response to request_id 0
+                                if request_id == 0:
+                                    self.registration_complete.set()
+                                    continue
 
-                            receive_time = time.time()
-                            with self.lock:
-                                if request_id in self.send_times:
-                                    latency = (receive_time - self.send_times[request_id]) * 1000
-                                    completed_requests[request_id] = latency
-                                    del self.send_times[request_id]
+                                receive_time = time.time()
+                                with self.lock:
+                                    if request_id in self.send_times:
+                                        latency = (receive_time - self.send_times[request_id]) * 1000
+                                        completed_requests[request_id] = latency
+                                        del self.send_times[request_id]
 
                         # Write to the latency file when request is complete
                         while next_request <= self.num_requests and next_request in completed_requests:
