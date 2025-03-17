@@ -293,7 +293,7 @@ class UEClient:
                     
                     try:
                         # Connect to server's file port
-                        print(f"UE {self.rnti}: Connecting to server for file transfer at {self.server_ip}:{self.file_port}")
+                        # print(f"UE {self.rnti}: Connecting to server for file transfer at {self.server_ip}:{self.file_port}")
                         file_socket.connect((self.server_ip, self.file_port))
                         
                         with self.lock:
