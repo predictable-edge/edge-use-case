@@ -229,17 +229,35 @@ class UEClient:
             self.timestamp_c0 = time.time()
             handshake_msg = struct.pack('!4sId4s', b'HSHK', 1, self.timestamp_c0, self.rnti.encode().ljust(4))
             socket.sendto(handshake_msg, (self.server_ip, self.server_port))
+            print(f"UE {self.rnti}: Sent first handshake message with timestamp {self.timestamp_c0}")
             
             # Wait for handshake response to calculate RTT
-            if not self.handshake_complete.wait(self.handshake_timeout):
-                print(f"UE {self.rnti}: Handshake timeout")
+            print(f"UE {self.rnti}: Waiting for handshake response...")
+            handshake_start = time.time()
+            while not self.handshake_complete.is_set() and time.time() - handshake_start < self.handshake_timeout:
+                time.sleep(0.1)  # Short sleep to avoid busy waiting
+                
+                # Re-send handshake message every second if no response
+                if time.time() - handshake_start > 1.0 and not self.handshake_complete.is_set():
+                    print(f"UE {self.rnti}: Re-sending handshake message...")
+                    socket.sendto(handshake_msg, (self.server_ip, self.server_port))
+                    handshake_start = time.time()  # Reset start time
+            
+            if not self.handshake_complete.is_set():
+                print(f"UE {self.rnti}: Handshake timeout after {self.handshake_timeout} seconds")
                 return False
+                
+            print(f"UE {self.rnti}: Handshake response received, RTT: {self.rtt*1000:.2f} ms")
             
             # Third handshake message with RTT
             handshake_msg = struct.pack('!4sId4s', b'HSHK', 3, self.rtt, self.rnti.encode().ljust(4))
             socket.sendto(handshake_msg, (self.server_ip, self.server_port))
+            print(f"UE {self.rnti}: Sent RTT value to server: {self.rtt*1000:.2f} ms")
             
-            print(f"UE {self.rnti}: Handshake completed, RTT: {self.rtt*1000:.2f} ms")
+            # Wait a bit to allow server to process the RTT
+            time.sleep(0.5)
+            
+            print(f"UE {self.rnti}: Handshake completed successfully")
             return True
             
         except Exception as e:
@@ -475,6 +493,7 @@ class UEClient:
                         # Check if this is a handshake response
                         if len(data) >= 8 and data[:4] == b'HSHK':
                             handshake_type = struct.unpack('!I', data[4:8])[0]
+                            print(f"UE {self.rnti}: Received handshake message type {handshake_type}")
                             
                             if handshake_type == 2:  # Server's response to initial handshake
                                 # Extract RNTI from response
@@ -485,13 +504,20 @@ class UEClient:
                                     receive_time = time.time()
                                     # Calculate RTT as current time minus the time we sent the first handshake
                                     self.rtt = receive_time - self.timestamp_c0
+                                    print(f"UE {self.rnti}: Calculated RTT: {self.rtt*1000:.2f} ms")
                                     self.handshake_complete.set()
-                                    print(f"UE {self.rnti}: Handshake response received, RTT calculated: {self.rtt*1000:.2f} ms")
+                                    print(f"UE {self.rnti}: Handshake phase 1 completed")
+                                else:
+                                    print(f"UE {self.rnti}: Received handshake for different RNTI: {recv_rnti}")
                                 
                                 continue
                                 
                             elif handshake_type == 4:  # Server's acknowledgment of RTT
-                                # No action needed, just continue
+                                rnti_bytes = data[8:12]
+                                recv_rnti = rnti_bytes.decode().strip()
+                                if recv_rnti == self.rnti:
+                                    print(f"UE {self.rnti}: Server acknowledged RTT")
+                                
                                 continue
                         
                         # Process regular response packet

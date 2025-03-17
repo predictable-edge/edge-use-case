@@ -360,32 +360,51 @@ class Server:
                     
                     # Record server timestamp
                     timestamp_s0 = time.time()
+                    print(f"Server: Received handshake from RNTI {rnti_str}, timestamp_c0={timestamp_c0}")
                     
                     with self.tracker_lock:
-                        if client_key in self.ue_trackers:
-                            tracker = self.ue_trackers[client_key]
-                            tracker.timestamp_s0 = timestamp_s0
-                            tracker.timestamp_c0 = timestamp_c0
+                        if client_key not in self.ue_trackers:
+                            # Create a new tracker for this UE if not exists
+                            print(f"Server: Creating new tracker for RNTI {rnti_str} during handshake")
+                            tracker = UETracker(
+                                rnti_str=rnti_str,
+                                client_port=client_address[1],  # Use source port as client port
+                                latency_req=100,  # Default value
+                                request_size=0,   # Will be updated later
+                                controller_ip=self.controller_ip,
+                                controller_port=self.controller_port
+                            )
+                            self.ue_trackers[client_key] = tracker
+                        
+                        tracker = self.ue_trackers[client_key]
+                        tracker.timestamp_s0 = timestamp_s0
+                        tracker.timestamp_c0 = timestamp_c0
                     
                     # Send response without server timestamp
                     response = struct.pack('!4sI4s', b'HSHK', 2, rnti_str.encode().ljust(4))
                     self.socket.sendto(response, (self.response_ip, client_address[1]))
+                    print(f"Server: Sent handshake response to RNTI {rnti_str}")
                     return
                     
                 elif handshake_type == 3:  # RTT message from client
                     # Extract client RTT and RNTI
                     rtt, rnti_str = struct.unpack('!d4s', data[8:20])
                     rnti_str = rnti_str.decode().strip()
+                    print(f"Server: Received RTT {rtt*1000:.2f}ms from RNTI {rnti_str}")
                     
                     # Store RTT in tracker
                     with self.tracker_lock:
                         if client_key in self.ue_trackers:
                             tracker = self.ue_trackers[client_key]
                             tracker.t1 = rtt  # Store full RTT value
+                            print(f"Server: Stored RTT for RNTI {rnti_str}: {rtt*1000:.2f}ms")
+                        else:
+                            print(f"Server: No tracker found for RNTI {rnti_str} in RTT message")
                     
                     # Acknowledge RTT received
                     response = struct.pack('!4sI4s', b'HSHK', 4, rnti_str.encode().ljust(4))
                     self.socket.sendto(response, (self.response_ip, client_address[1]))
+                    print(f"Server: Sent RTT acknowledgment to RNTI {rnti_str}")
                     return
             
             # If not a handshake, process as regular packet
@@ -457,6 +476,19 @@ class Server:
                             time_diff_server = timestamp_s1 - tracker.timestamp_s0
                             time_diff_client = timestamp_c1 - tracker.timestamp_c0
                             transmission_delay = tracker.t1 + (time_diff_server - time_diff_client)
+                            print(f"Server: Calculated delay for RNTI {rnti_str}, request {request_id}:")
+                            print(f"  t1 (RTT): {tracker.t1*1000:.2f}ms")
+                            print(f"  s1-s0 (server diff): {time_diff_server*1000:.2f}ms")
+                            print(f"  c1-c0 (client diff): {time_diff_client*1000:.2f}ms")
+                            print(f"  Result: {transmission_delay*1000:.2f}ms")
+                        else:
+                            missing = []
+                            if tracker.timestamp_s0 <= 0: missing.append("s0")
+                            if timestamp_c1 <= 0: missing.append("c1")
+                            if tracker.timestamp_c0 <= 0: missing.append("c0")
+                            if tracker.t1 <= 0: missing.append("t1")
+                            print(f"Server: Cannot calculate delay for RNTI {rnti_str}, request {request_id}. Missing: {', '.join(missing)}")
+                            print(f"  s0: {tracker.timestamp_s0}, c0: {tracker.timestamp_c0}, c1: {timestamp_c1}, t1: {tracker.t1}")
                     
                     # Send response for first packet with transmission delay information
                     response = struct.pack('!I4sBd', request_id, rnti_str.encode().ljust(4), 1, transmission_delay)  # 1 indicates first packet response
@@ -472,6 +504,15 @@ class Server:
                             time_diff_server = timestamp_s1 - tracker.timestamp_s0
                             time_diff_client = timestamp_c1 - tracker.timestamp_c0
                             transmission_delay = tracker.t1 + (time_diff_server - time_diff_client)
+                            print(f"Server: Calculated final delay for RNTI {rnti_str}, request {request_id}: {transmission_delay*1000:.2f}ms")
+                        else:
+                            missing = []
+                            if tracker.timestamp_s0 <= 0: missing.append("s0")
+                            if timestamp_c1 <= 0: missing.append("c1")
+                            if tracker.timestamp_c0 <= 0: missing.append("c0")
+                            if tracker.t1 <= 0: missing.append("t1")
+                            print(f"Server: Cannot calculate final delay for RNTI {rnti_str}, request {request_id}. Missing: {', '.join(missing)}")
+                            print(f"  s0: {tracker.timestamp_s0}, c0: {tracker.timestamp_c0}, c1: {timestamp_c1}, t1: {tracker.t1}")
                     
                     response = struct.pack('!I4sBd', request_id, rnti_str.encode().ljust(4), 2, transmission_delay)  # 2 indicates complete request response
                     self.socket.sendto(response, (self.response_ip, tracker.client_port))
