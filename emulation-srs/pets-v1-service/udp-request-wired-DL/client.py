@@ -284,6 +284,10 @@ class UEClient:
             enter_netns(self.namespace)
             print(f"UE {self.rnti}: Entered namespace {self.namespace}")
             
+            # Add delay to let latency tests start first
+            print(f"UE {self.rnti}: Waiting 5 seconds before starting file transfers...")
+            time.sleep(5)
+            
             try:
                 # Send files
                 for request_id in range(1, self.num_requests + 1):
@@ -304,17 +308,31 @@ class UEClient:
                         file_socket.sendall(reg_info)
                         
                         # Create file data (random bytes)
-                        file_data = b'\0' * (self.file_size_kb * 1024)  # Convert KB to bytes
+                        total_size = self.file_size_kb * 1024  # Convert KB to bytes
+                        file_data = b'\0' * total_size
+                        
+                        # Display initial information about the file transfer
+                        print(f"UE {self.rnti}: Starting transfer of file {request_id}/{self.num_requests} ({self.file_size_kb} KB)")
                         
                         # Send file data
                         bytes_sent = 0
-                        total_size = len(file_data)
+                        last_percent = 0
+                        progress_interval = 50  # Show progress every 5%
                         
                         while bytes_sent < total_size:
-                            sent = file_socket.send(file_data[bytes_sent:bytes_sent + 4096])
+                            chunk_size = min(4096, total_size - bytes_sent)
+                            sent = file_socket.send(file_data[bytes_sent:bytes_sent + chunk_size])
                             if sent == 0:
                                 raise RuntimeError("Socket connection broken")
                             bytes_sent += sent
+                            
+                            # Calculate and display progress
+                            current_percent = int((bytes_sent / total_size) * 100)
+                            if current_percent >= last_percent + progress_interval:
+                                last_percent = current_percent
+                                print(f"UE {self.rnti}: File {request_id} transfer progress: {current_percent}% ({bytes_sent/1024:.1f} KB / {total_size/1024:.1f} KB)")
+                        
+                        print(f"UE {self.rnti}: File {request_id} transfer completed: 100% ({total_size/1024:.1f} KB)")
                         
                         # Wait for completion response
                         response = file_socket.recv(1024).decode().strip()
@@ -328,9 +346,7 @@ class UEClient:
                                     if request_id in self.send_times:
                                         latency = (receive_time - self.send_times[request_id]) * 1000
                                         self.write_file_result(request_id, latency)
-                        
-                        if request_id % 10 == 0:
-                            print(f"UE {self.rnti}: Sent file {request_id}/{self.num_requests}")
+                                        print(f"UE {self.rnti}: File {request_id} transfer latency: {latency:.2f} ms")
                         
                     finally:
                         file_socket.close()

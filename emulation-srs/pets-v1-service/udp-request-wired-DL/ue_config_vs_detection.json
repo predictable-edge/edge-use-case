@@ -1,0 +1,57 @@
+[
+    {
+        "namespace": "ue1",
+        "listen_port": 10001,
+        "num_requests": 2400,
+        "request_size": 30,
+        "interval": 16,
+        "latency_req": 50,
+        "controller_ip": "192.168.0.12",
+        "controller_port": 5557,
+        "type": "latency"
+    },
+    {
+        "namespace": "ue2",
+        "listen_port": 10002,
+        "num_requests": 400,
+        "request_size": 50,
+        "interval": 100,
+        "latency_req": 100,
+        "controller_ip": "192.168.0.12",
+        "controller_port": 5557,
+        "type": "latency"
+    },
+    {
+        "namespace": "ue3",
+        "listen_port": 10003,
+        "num_requests": 400,
+        "request_size": 50,
+        "interval": 100,
+        "latency_req": 100,
+        "controller_ip": "192.168.0.12",
+        "controller_port": 5557,
+        "type": "latency"
+    },
+    {
+        "namespace": "ue4",
+        "listen_port": 10004,
+        "num_requests": 400,
+        "request_size": 50,
+        "interval": 100,
+        "latency_req": 100,
+        "controller_ip": "192.168.0.12",
+        "controller_port": 5557,
+        "type": "latency"
+    },
+    {
+        "namespace": "ue5",
+        "listen_port": 10005,
+        "num_requests": 400,
+        "request_size": 50,
+        "interval": 100,
+        "latency_req": 100,
+        "controller_ip": "192.168.0.12",
+        "controller_port": 5557,
+        "type": "latency"
+    }
+]
