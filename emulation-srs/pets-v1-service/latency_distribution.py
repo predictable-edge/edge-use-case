@@ -50,16 +50,19 @@ def analyze_latency_data(file_path, output_name):
     first_var = np.var(df['First Packet Latency'])
     first_std = np.std(df['First Packet Latency'])
     first_median = np.median(df['First Packet Latency'])
+    first_p99 = np.percentile(df['First Packet Latency'], 99)
     
     diff_mean = np.mean(df['Latency Difference'])
     diff_var = np.var(df['Latency Difference'])
     diff_std = np.std(df['Latency Difference'])
     diff_median = np.median(df['Latency Difference'])
+    diff_p99 = np.percentile(df['Latency Difference'], 99)
     
     # Print statistics
     print(f"First Packet Latency Statistics:")
     print(f"  Mean: {first_mean:.2f} ms")
     print(f"  Median: {first_median:.2f} ms")
+    print(f"  P99: {first_p99:.2f} ms")
     print(f"  Variance: {first_var:.2f} ms²")
     print(f"  Standard Deviation: {first_std:.2f} ms")
     print()
@@ -67,6 +70,7 @@ def analyze_latency_data(file_path, output_name):
     print(f"Total - First Packet Latency Statistics:")
     print(f"  Mean: {diff_mean:.2f} ms")
     print(f"  Median: {diff_median:.2f} ms")
+    print(f"  P99: {diff_p99:.2f} ms")
     print(f"  Variance: {diff_var:.2f} ms²")
     print(f"  Standard Deviation: {diff_std:.2f} ms")
     
@@ -114,7 +118,7 @@ def analyze_latency_data(file_path, output_name):
     plt.tight_layout()
     
     # Save figure with specified name in the figures directory
-    plt.savefig(f'figures/{output_name}', dpi=300, bbox_inches='tight')
+    plt.savefig(f'figure/{output_name}', dpi=300, bbox_inches='tight')
     plt.show()
     
     return df
@@ -124,7 +128,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Analyze latency data from a file and generate distribution plots.')
     parser.add_argument('file_path', type=str, help='Path to the latency data file')
     parser.add_argument('--output', type=str, default='latency_distribution.pdf', 
-                        help='Output filename for the plot (will be saved in figures/ directory)')
+                        help='Output filename for the plot (will be saved in figure/ directory)')
     
     args = parser.parse_args()
     
