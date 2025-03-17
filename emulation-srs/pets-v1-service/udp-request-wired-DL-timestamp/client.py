@@ -390,7 +390,7 @@ class UEClient:
                     
                     try:
                         # Connect to server's file port
-                        print(f"UE {self.rnti}: Connecting to server for file transfer at {self.server_ip}:{self.file_port}")
+                        # print(f"UE {self.rnti}: Connecting to server for file transfer at {self.server_ip}:{self.file_port}")
                         file_socket.connect((self.server_ip, self.file_port))
                         
                         with self.lock:
@@ -405,7 +405,7 @@ class UEClient:
                         file_data = b'\0' * total_size
                         
                         # Display initial information about the file transfer
-                        print(f"UE {self.rnti}: Starting transfer of file {request_id}/{self.num_requests} ({self.file_size_kb} KB)")
+                        # print(f"UE {self.rnti}: Starting transfer of file {request_id}/{self.num_requests} ({self.file_size_kb} KB)")
                         
                         # Send file data
                         bytes_sent = 0
@@ -423,9 +423,9 @@ class UEClient:
                             current_percent = int((bytes_sent / total_size) * 100)
                             if current_percent >= last_percent + progress_interval:
                                 last_percent = current_percent
-                                print(f"UE {self.rnti}: File {request_id} transfer progress: {current_percent}% ({bytes_sent/1024:.1f} KB / {total_size/1024:.1f} KB)")
+                                # print(f"UE {self.rnti}: File {request_id} transfer progress: {current_percent}% ({bytes_sent/1024:.1f} KB / {total_size/1024:.1f} KB)")
                         
-                        print(f"UE {self.rnti}: File {request_id} transfer completed: 100% ({total_size/1024:.1f} KB)")
+                        # print(f"UE {self.rnti}: File {request_id} transfer completed: 100% ({total_size/1024:.1f} KB)")
                         
                         # Wait for completion response
                         response = file_socket.recv(1024).decode().strip()
