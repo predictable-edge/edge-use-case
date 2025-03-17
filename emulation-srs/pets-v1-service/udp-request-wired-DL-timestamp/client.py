@@ -349,8 +349,9 @@ class UEClient:
                     
                     # Sleep until the next request interval
                     elapsed = time.time() - start_time
-                    if elapsed < self.interval and request_id < self.num_requests:
-                        time.sleep(self.interval - elapsed)
+                    interval_s = self.interval / 1000.0
+                    if elapsed < interval_s and request_id < self.num_requests:
+                        time.sleep(interval_s - elapsed)
                 
                 print(f"UE {self.rnti}: Completed all {self.num_requests} requests")
                 
