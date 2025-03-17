@@ -470,19 +470,24 @@ class UEClient:
         os.makedirs(result_dir, exist_ok=True)
         latency_file = os.path.join(result_dir, f'latency_rnti{self.ue_id}.txt')
         delay_comparison_file = os.path.join(result_dir, f'delay_comparison_rnti{self.ue_id}.txt')
+        first_packet_file = os.path.join(result_dir, f'first_packet_rnti{self.ue_id}.txt')
         
         completed_requests = {}
         first_packet_times = {}
 
         try:
             # Open files in append mode
-            with open(latency_file, 'a') as f, open(delay_comparison_file, 'a') as dc:
+            with open(latency_file, 'a') as f, open(delay_comparison_file, 'a') as dc, open(first_packet_file, 'a') as fp:
                 # Write configuration headers
                 f.write(f"\n\n=== Configuration: request_size={self.packets_per_request}, interval={self.interval} ===\n")
                 f.write(f"{'Request ID':<15}{'Latency (ms)':>15}\n")
                 
                 dc.write(f"\n\n=== Configuration: request_size={self.packets_per_request}, interval={self.interval} ===\n")
                 dc.write(f"{'Request ID':<10}{'Client RTT (ms)':>15}{'Server Inferred Delay (ms)':>30}\n")
+                
+                # Add header for first packet file
+                fp.write(f"\n\n=== Configuration: request_size={self.packets_per_request}, interval={self.interval} ===\n")
+                fp.write(f"{'Request ID':<15}{'First Packet Time (ms)':>25}{'Total Latency (ms)':>20}\n")
                 
                 next_request = 1
 
@@ -544,14 +549,12 @@ class UEClient:
                                         total_latency = (receive_time - self.send_times[request_id]) * 1000
                                         completed_requests[request_id] = total_latency
                                         
-                                        # 记录服务器计算的延迟
+                                        # Record server calculated delay
                                         self.server_delays[request_id] = server_delay * 1000  # Convert to ms
                                         
-                                        # 写入延迟比较文件
                                         dc.write(f"{request_id:<10}{total_latency:>15.2f}{self.server_delays[request_id]:>30.2f}\n")
                                         dc.flush()
                                         
-                                        # 写入第一个包和总延迟到first_packet_file
                                         if request_id in first_packet_times:
                                             fp.write(f"{request_id:<15}{first_packet_times[request_id]:>25.2f}{total_latency:>20.2f}\n")
                                             fp.flush()
