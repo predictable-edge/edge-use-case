@@ -13,8 +13,8 @@
     {
         "namespace": "ue2",
         "listen_port": 10002,
-        "num_requests": 2,
-        "request_size": 10240,
+        "num_requests": 60,
+        "request_size": 1024,
         "interval": 1,
         "latency_req": 10000,
         "controller_ip": "192.168.0.12",
