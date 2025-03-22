@@ -342,14 +342,15 @@ void packet_reading_thread(AVFormatContext* input_fmt_ctx, int video_stream_idx,
     packet_queue.set_finished();
 }
 
-void decoding_thread(AVCodecContext* decoder_ctx, PacketQueue& packet_queue, const std::vector<FrameQueue*>& encoder_queues) {
+void decoding_thread(AVCodecContext* decoder_ctx, PacketQueue& packet_queue, FrameQueue* frame_queue) {
     AVPacket* packet = nullptr;
     AVFrame* frame = av_frame_alloc();
     if (!frame) {
         std::cerr << "Could not allocate AVFrame" << std::endl;
-        for (auto& q : encoder_queues) q->set_finished();
+        frame_queue->set_finished();
         return;
     }
+    uint32_t frame_number = 0;
 
     while (packet_queue.pop(packet)) {
         auto decode_start = std::chrono::steady_clock::now();
@@ -372,19 +373,21 @@ void decoding_thread(AVCodecContext* decoder_ctx, PacketQueue& packet_queue, con
             // std::cout << frame->pts << ": " << get_timestamp_with_ms() << std::endl;
 
             auto decode_end = std::chrono::steady_clock::now();
-
-            for (auto& q : encoder_queues) {
-                AVFrame* cloned_frame = av_frame_clone(frame);
-                if (!cloned_frame) {
-                    std::cerr << "Could not clone frame" << std::endl;
-                    continue;
-                }
-                FrameData frame_data;
-                frame_data.frame = cloned_frame;
-                frame_data.decode_start_time = decode_start;
-                frame_data.decode_end_time = decode_end;
-                q->push(frame_data);
+            frame_number++;
+            if (frame_number % 100 == 0) {
+                std::cout << "Decoded frame: " << frame_number << " Time used:" << std::chrono::duration_cast<std::chrono::milliseconds>(decode_end - decode_start).count() << "ms" << std::endl;
             }
+
+            AVFrame* cloned_frame = av_frame_clone(frame);
+            if (!cloned_frame) {
+                std::cerr << "Could not clone frame" << std::endl;
+                continue;
+            }
+            FrameData frame_data;
+            frame_data.frame = cloned_frame;
+            frame_data.decode_start_time = decode_start;
+            frame_data.decode_end_time = decode_end;
+            frame_queue->push(frame_data);
             av_frame_unref(frame);
         }
     }
@@ -399,32 +402,28 @@ void decoding_thread(AVCodecContext* decoder_ctx, PacketQueue& packet_queue, con
             break;
         }
 
-        for (auto& q : encoder_queues) {
-            AVFrame* cloned_frame = av_frame_clone(frame);
-            if (!cloned_frame) {
-                std::cerr << "Could not clone frame" << std::endl;
-                continue;
-            }
-            FrameData frame_data;
-            frame_data.frame = cloned_frame;
-            frame_data.decode_start_time = std::chrono::steady_clock::now();;
-            frame_data.decode_end_time = std::chrono::steady_clock::now();;
-            q->push(frame_data);
+        AVFrame* cloned_frame = av_frame_clone(frame);
+        if (!cloned_frame) {
+            std::cerr << "Could not clone frame" << std::endl;
+            continue;
         }
+        FrameData frame_data;
+        frame_data.frame = cloned_frame;
+        frame_data.decode_start_time = std::chrono::steady_clock::now();;
+        frame_data.decode_end_time = std::chrono::steady_clock::now();;
+        frame_queue->push(frame_data);
         av_frame_unref(frame);
     }
 
-    for (auto& q : encoder_queues) q->set_finished();
+    frame_queue->set_finished();
     av_frame_free(&frame);
 }
 
-bool decode_frames(DecoderInfo decoder_info, std::vector<FrameQueue*>& encoder_queues, std::atomic<bool>& decode_finished) {
+bool decode_frames(DecoderInfo decoder_info, FrameQueue* frame_queue, std::atomic<bool>& decode_finished) {
     PacketQueue packet_queue;
-    std::atomic<bool> encoding_finished(false);
-    std::vector<std::thread> encoder_threads;
 
     std::thread reader(packet_reading_thread, decoder_info.input_fmt_ctx, decoder_info.video_stream_idx, std::ref(packet_queue));
-    std::thread decoder(decoding_thread, decoder_info.decoder_ctx, std::ref(packet_queue), std::ref(encoder_queues));
+    std::thread decoder(decoding_thread, decoder_info.decoder_ctx, std::ref(packet_queue), std::ref(frame_queue));
 
     reader.join();
     decoder.join();
@@ -458,12 +457,11 @@ int main(int argc, char* argv[]) {
     }
 
     // Prepare frame queues for each encoder
-    std::vector<FrameQueue*> frame_queues;
-    frame_queues.push_back(new FrameQueue());
+    FrameQueue* frame_queue = new FrameQueue();
 
     // Start decoder thread
     std::thread decoder_thread([&]() {
-        if (!decode_frames(decoder_info, frame_queues, decode_finished)) {
+        if (!decode_frames(decoder_info, frame_queue, decode_finished)) {
             std::cerr << "Decoding failed" << std::endl;
         }
     });
@@ -472,9 +470,7 @@ int main(int argc, char* argv[]) {
     decoder_thread.join();
 
     // Clean up frame queues
-    for (auto& q : frame_queues) {
-        delete q;
-    }
+    delete frame_queue;
 
     // Clean up FFmpeg
     avformat_network_deinit();
