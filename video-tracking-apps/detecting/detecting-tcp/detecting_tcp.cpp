@@ -1,0 +1,482 @@
+#include <iostream>
+#include <thread>
+#include <queue>
+#include <mutex>
+#include <condition_variable>
+#include <atomic>
+#include <string>
+#include <chrono>
+#include <fstream>
+#include <iomanip>
+#include <sstream>
+#include <sys/time.h>
+#include <ctime>
+#include <assert.h>
+#include <vector>
+#include <filesystem>
+
+// FFmpeg includes
+extern "C" {
+#include <libavcodec/avcodec.h>
+#include <libavformat/avformat.h>
+#include <libavutil/avutil.h>
+#include <libavutil/imgutils.h>
+#include <libswscale/swscale.h>
+}
+
+// Helper function to convert FFmpeg error codes to std::string
+std::string get_error_text(int errnum) {
+    char errbuf[AV_ERROR_MAX_STRING_SIZE] = {0};
+    av_strerror(errnum, errbuf, sizeof(errbuf));
+    return std::string(errbuf);
+}
+
+std::string get_timestamp_with_ms() {
+    auto now = std::chrono::system_clock::now();
+    auto ms_part = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
+    auto now_time_t = std::chrono::system_clock::to_time_t(now);
+    std::tm* now_tm = std::localtime(&now_time_t);
+    char buffer[20];
+    std::strftime(buffer, sizeof(buffer), "%Y%m%d-%H%M%S", now_tm);
+    std::ostringstream oss;
+    oss << buffer << std::setw(3) << std::setfill('0') << ms_part.count();
+    return oss.str();
+}
+
+int64_t get_current_time_us() {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return ((int64_t)tv.tv_sec * 1000000) + tv.tv_usec;
+}
+
+// Structure to hold frame data and timing information
+struct FrameData {
+    AVFrame* frame;
+    std::chrono::steady_clock::time_point decode_start_time;
+    std::chrono::steady_clock::time_point decode_end_time;
+};
+
+// Thread-safe queue for FrameData
+class FrameQueue {
+public:
+    void push(const FrameData& frame_data) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        queue_.push(frame_data);
+        cond_var_.notify_one();
+    }
+
+    bool pop(FrameData& frame_data) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        while (queue_.empty() && !finished_) {
+            cond_var_.wait(lock);
+        }
+        if (queue_.empty())
+            return false;
+        frame_data = queue_.front();
+        queue_.pop();
+        return true;
+    }
+
+    size_t size() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return queue_.size();
+    }
+
+    bool is_empty() {
+        return queue_.empty();
+    }
+
+    void set_finished() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        finished_ = true;
+        cond_var_.notify_all();
+    }
+
+    bool is_finished() const {
+        return finished_;
+    }
+
+private:
+    std::queue<FrameData> queue_;
+    mutable std::mutex mutex_;
+    std::condition_variable cond_var_;
+    bool finished_ = false;
+};
+
+// Thread-safe queue for AVPacket*
+class PacketQueue {
+public:
+    void push(AVPacket* packet) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        queue_.push(packet);
+        cond_var_.notify_one();
+    }
+
+    bool pop(AVPacket*& packet) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        while (queue_.empty() && !finished_) {
+            cond_var_.wait(lock);
+        }
+        if (queue_.empty()) return false;
+        packet = queue_.front();
+        queue_.pop();
+        return true;
+    }
+
+    bool is_empty() {
+        return queue_.empty();
+    }
+
+    void set_finished() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        finished_ = true;
+        cond_var_.notify_all();
+    }
+
+private:
+    std::queue<AVPacket*> queue_;
+    std::mutex mutex_;
+    std::condition_variable cond_var_;
+    bool finished_ = false;
+};
+
+// Thread-safe vector to store timing information
+class TimingLogger {
+public:
+    TimingLogger(const std::string& log_filename) : filename_(log_filename) {}
+
+    void add_entry(int frame_number, double decode_time_ms, double encode_time_ms, double interval_ms) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        log_entries.emplace_back(frame_number, decode_time_ms, encode_time_ms, interval_ms);
+    }
+
+    void write_to_file() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        std::filesystem::path filepath(filename_);
+        std::filesystem::path parent_path = filepath.parent_path();
+        try {
+            if (!parent_path.empty() && !std::filesystem::exists(parent_path)) {
+                std::filesystem::create_directories(parent_path);
+                std::cout << "Created directories: " << parent_path << std::endl;
+            }
+        } catch (const std::filesystem::filesystem_error& e) {
+            std::cerr << "Filesystem error: " << e.what() << std::endl;
+            return;
+        }
+        std::ofstream ofs(filename_);
+        if (!ofs.is_open()) {
+            std::cerr << "Failed to open " << filename_ << " for writing." << std::endl;
+            return;
+        }
+        ofs << std::fixed << std::setprecision(4);
+
+        // Write header
+        ofs << std::left << std::setw(10) << "Frame" 
+            << std::left << std::setw(20) << "Decode Time (ms)" 
+            << std::left << std::setw(20) << "Encode Time (ms)" 
+            << std::left << std::setw(20) << "Transcode Time (ms)" 
+            << "\n";
+
+        // Write each entry
+        for (const auto& entry : log_entries) {
+            ofs << std::left << std::setw(10) << entry.frame_number
+                << std::left << std::setw(20) << entry.decode_time_ms
+                << std::left << std::setw(20) << entry.encode_time_ms
+                << std::left << std::setw(20) << entry.interval_ms
+                << "\n";
+        }
+
+        ofs.close();
+        std::cout << "Timing information written to " << filename_ << std::endl;
+    }
+
+private:
+    struct LogEntry {
+        int frame_number;
+        double decode_time_ms;
+        double encode_time_ms;
+        double interval_ms;
+
+        LogEntry(int fn, double dt, double et, double it)
+            : frame_number(fn), decode_time_ms(dt), encode_time_ms(et), interval_ms(it) {}
+    };
+
+    std::vector<LogEntry> log_entries;
+    std::mutex mutex_;
+    std::string filename_;
+};
+
+// Structure to hold decoder information
+struct DecoderInfo {
+    AVFormatContext* input_fmt_ctx;
+    AVCodecContext* decoder_ctx;
+    int video_stream_idx;
+    AVRational input_time_base;
+    double input_framerate;
+};
+
+// Decoder Initialization and Function
+bool initialize_decoder(const char* input_url, DecoderInfo& decoder_info) {
+    // Initialize input format context
+    decoder_info.input_fmt_ctx = nullptr;
+    AVDictionary* format_opts = nullptr;
+    if (avformat_open_input(&decoder_info.input_fmt_ctx, input_url, nullptr, &format_opts) < 0) {
+        std::cerr << "Could not open input tcp stream: " << input_url << std::endl;
+        av_dict_free(&format_opts);
+        return false;
+    }
+
+    // Find stream information
+    if (avformat_find_stream_info(decoder_info.input_fmt_ctx, nullptr) < 0) {
+        std::cerr << "Could not find stream information" << std::endl;
+        avformat_close_input(&decoder_info.input_fmt_ctx);
+        return false;
+    }
+
+    // Find the first video stream
+    decoder_info.video_stream_idx = -1;
+    AVCodecParameters* codecpar = nullptr;
+    for (unsigned int i = 0; i < decoder_info.input_fmt_ctx->nb_streams; ++i) {
+        if (decoder_info.input_fmt_ctx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+            decoder_info.video_stream_idx = i;
+            codecpar = decoder_info.input_fmt_ctx->streams[i]->codecpar;
+            break;
+        }
+    }
+
+    if (decoder_info.video_stream_idx == -1) {
+        std::cerr << "Could not find a video stream in the input" << std::endl;
+        avformat_close_input(&decoder_info.input_fmt_ctx);
+        return false;
+    }
+
+    // Find decoder
+    const AVCodec* decoder = avcodec_find_decoder(codecpar->codec_id);
+    if (!decoder) {
+        std::cerr << "Could not find decoder for the video stream" << std::endl;
+        avformat_close_input(&decoder_info.input_fmt_ctx);
+        return false;
+    }
+
+    // Allocate decoder context
+    decoder_info.decoder_ctx = avcodec_alloc_context3(decoder);
+    if (!decoder_info.decoder_ctx) {
+        std::cerr << "Could not allocate decoder context" << std::endl;
+        avformat_close_input(&decoder_info.input_fmt_ctx);
+        return false;
+    }
+
+    // Copy codec parameters to decoder context
+    if (avcodec_parameters_to_context(decoder_info.decoder_ctx, codecpar) < 0) {
+        std::cerr << "Failed to copy decoder parameters to context" << std::endl;
+        avcodec_free_context(&decoder_info.decoder_ctx);
+        avformat_close_input(&decoder_info.input_fmt_ctx);
+        return false;
+    }
+    // ctx information must be setting before open2...
+    decoder_info.decoder_ctx->thread_count = 0;
+    decoder_info.decoder_ctx->thread_type = FF_THREAD_SLICE;
+    decoder_info.decoder_ctx->flags2 |= AV_CODEC_FLAG2_FAST;
+    decoder_info.decoder_ctx->flags |= AV_CODEC_FLAG_LOW_DELAY;
+
+    // decoder_info.decoder_ctx->thread_count = 4;
+    // decoder_info.decoder_ctx->flags2 |= AV_CODEC_FLAG2_FAST;
+    // Open decoder
+    if (avcodec_open2(decoder_info.decoder_ctx, decoder, nullptr) < 0) {
+        std::cerr << "Could not open decoder" << std::endl;
+        avcodec_free_context(&decoder_info.decoder_ctx);
+        avformat_close_input(&decoder_info.input_fmt_ctx);
+        return false;
+    }
+
+    // Store input stream's time_base
+    decoder_info.input_time_base = decoder_info.input_fmt_ctx->streams[decoder_info.video_stream_idx]->time_base;
+
+    AVRational frame_rate_rational = av_guess_frame_rate(decoder_info.input_fmt_ctx, 
+                                                         decoder_info.input_fmt_ctx->streams[decoder_info.video_stream_idx], 
+                                                         nullptr);
+    if (frame_rate_rational.num == 0 || frame_rate_rational.den == 0) {
+        decoder_info.input_framerate = 30.0;
+        std::cerr << "Warning: Could not determine input frame rate. Using default 30 FPS." << std::endl;
+    } else {
+        decoder_info.input_framerate = av_q2d(frame_rate_rational);
+    }
+
+    std::cout << "Input frame rate: " << decoder_info.input_framerate << " FPS" << std::endl;
+    std::cout << "Decoder initialized successfully." << std::endl;
+    return true;
+}
+
+// Decoder Function
+void packet_reading_thread(AVFormatContext* input_fmt_ctx, int video_stream_idx, PacketQueue& packet_queue) {
+    AVPacket* packet = av_packet_alloc();
+    if (!packet) {
+        std::cerr << "Could not allocate AVPacket" << std::endl;
+        packet_queue.set_finished();
+        return;
+    }
+
+    while (true) {
+        int ret = av_read_frame(input_fmt_ctx, packet);
+        if (ret < 0) {
+            if (ret == AVERROR_EOF) break;
+            std::cerr << "Error reading frame: " << get_error_text(ret) << std::endl;
+            break;
+        }
+
+        if (packet->stream_index == video_stream_idx) {
+            packet_queue.push(packet);
+            packet = av_packet_alloc();
+            if (!packet) {
+                std::cerr << "Could not allocate AVPacket" << std::endl;
+                break;
+            }
+        } else {
+            av_packet_unref(packet);
+        }
+    }
+
+    if (packet) {
+        av_packet_free(&packet);
+    }
+    packet_queue.set_finished();
+}
+
+void decoding_thread(AVCodecContext* decoder_ctx, PacketQueue& packet_queue, const std::vector<FrameQueue*>& encoder_queues) {
+    AVPacket* packet = nullptr;
+    AVFrame* frame = av_frame_alloc();
+    if (!frame) {
+        std::cerr << "Could not allocate AVFrame" << std::endl;
+        for (auto& q : encoder_queues) q->set_finished();
+        return;
+    }
+
+    while (packet_queue.pop(packet)) {
+        auto decode_start = std::chrono::steady_clock::now();
+        int ret = avcodec_send_packet(decoder_ctx, packet);
+        av_packet_free(&packet);
+        if (ret < 0) {
+            std::cerr << "Error sending packet to decoder: " << get_error_text(ret) << std::endl;
+            continue;
+        }
+
+        while (ret >= 0) {
+            ret = avcodec_receive_frame(decoder_ctx, frame);
+            if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
+                break;
+            }
+            else if (ret < 0) {
+                std::cerr << "Error receiving frame from decoder: " << get_error_text(ret) << std::endl;
+                break;
+            }
+            // std::cout << frame->pts << ": " << get_timestamp_with_ms() << std::endl;
+
+            auto decode_end = std::chrono::steady_clock::now();
+
+            for (auto& q : encoder_queues) {
+                AVFrame* cloned_frame = av_frame_clone(frame);
+                if (!cloned_frame) {
+                    std::cerr << "Could not clone frame" << std::endl;
+                    continue;
+                }
+                FrameData frame_data;
+                frame_data.frame = cloned_frame;
+                frame_data.decode_start_time = decode_start;
+                frame_data.decode_end_time = decode_end;
+                q->push(frame_data);
+            }
+            av_frame_unref(frame);
+        }
+    }
+
+    // Flush decoder
+    avcodec_send_packet(decoder_ctx, nullptr);
+    while (true) {
+        int ret = avcodec_receive_frame(decoder_ctx, frame);
+        if (ret == AVERROR_EOF || ret == AVERROR(EAGAIN)) break;
+        if (ret < 0) {
+            std::cerr << "Error flushing decoder: " << get_error_text(ret) << std::endl;
+            break;
+        }
+
+        for (auto& q : encoder_queues) {
+            AVFrame* cloned_frame = av_frame_clone(frame);
+            if (!cloned_frame) {
+                std::cerr << "Could not clone frame" << std::endl;
+                continue;
+            }
+            FrameData frame_data;
+            frame_data.frame = cloned_frame;
+            frame_data.decode_start_time = std::chrono::steady_clock::now();;
+            frame_data.decode_end_time = std::chrono::steady_clock::now();;
+            q->push(frame_data);
+        }
+        av_frame_unref(frame);
+    }
+
+    for (auto& q : encoder_queues) q->set_finished();
+    av_frame_free(&frame);
+}
+
+bool decode_frames(DecoderInfo decoder_info, std::vector<FrameQueue*>& encoder_queues, std::atomic<bool>& decode_finished) {
+    PacketQueue packet_queue;
+    std::atomic<bool> encoding_finished(false);
+    std::vector<std::thread> encoder_threads;
+
+    std::thread reader(packet_reading_thread, decoder_info.input_fmt_ctx, decoder_info.video_stream_idx, std::ref(packet_queue));
+    std::thread decoder(decoding_thread, decoder_info.decoder_ctx, std::ref(packet_queue), std::ref(encoder_queues));
+
+    reader.join();
+    decoder.join();
+
+    decode_finished = true;
+    std::cout << "Decoding finished." << std::endl;
+    return true;
+}
+
+int main(int argc, char* argv[]) {
+    // Expecting 1 arguments: program, input_url
+    if (argc < 2) {
+        std::cerr << "Usage: " << argv[0] 
+                  << " tcp://192.168.2.3:9000?listen=1" 
+                  << std::endl;
+        return 1;
+    }
+
+    const char* input_url = argv[1];
+    // Initialize FFmpeg
+    avformat_network_init();
+
+    std::atomic<bool> decode_finished(false);
+
+    // Initialize decoder
+    DecoderInfo decoder_info;
+    if (!initialize_decoder(input_url, decoder_info)) {
+        std::cerr << "Decoder initialization failed" << std::endl;
+        avformat_network_deinit();
+        return 1;
+    }
+
+    // Prepare frame queues for each encoder
+    std::vector<FrameQueue*> frame_queues;
+    frame_queues.push_back(new FrameQueue());
+
+    // Start decoder thread
+    std::thread decoder_thread([&]() {
+        if (!decode_frames(decoder_info, frame_queues, decode_finished)) {
+            std::cerr << "Decoding failed" << std::endl;
+        }
+    });
+
+    // Wait for threads to finish
+    decoder_thread.join();
+
+    // Clean up frame queues
+    for (auto& q : frame_queues) {
+        delete q;
+    }
+
+    // Clean up FFmpeg
+    avformat_network_deinit();
+    return 0;
+}
