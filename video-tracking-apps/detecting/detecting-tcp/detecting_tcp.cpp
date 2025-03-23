@@ -14,6 +14,8 @@
 #include <assert.h>
 #include <vector>
 #include <filesystem>
+#include <zmq.hpp>
+#include <opencv2/opencv.hpp>
 
 // FFmpeg includes
 extern "C" {
@@ -433,6 +435,174 @@ bool decode_frames(DecoderInfo decoder_info, FrameQueue* frame_queue, std::atomi
     return true;
 }
 
+void process_frames_for_yolo(FrameQueue* frame_queue) {
+    // Initialize ZeroMQ context and socket
+    zmq::context_t context(1);
+    zmq::socket_t socket(context, ZMQ_PUB);
+    socket.bind("tcp://*:5555");
+    
+    std::cout << "Frame processing started, waiting for subscriber..." << std::endl;
+
+    // Initialize hardware context for FFmpeg
+    AVBufferRef* hw_device_ctx = NULL;
+    bool hw_accel_available = false;
+    
+    int err = av_hwdevice_ctx_create(&hw_device_ctx, AV_HWDEVICE_TYPE_CUDA, NULL, NULL, 0);
+    if (err >= 0) {
+        hw_accel_available = true;
+        std::cout << "CUDA hardware acceleration available for FFmpeg conversions" << std::endl;
+    } else {
+        std::cout << "CUDA hardware acceleration not available, using software conversion: " 
+                 << get_error_text(err) << std::endl;
+    }
+
+    // Performance tracking
+    int frame_counter = 0;
+    auto perf_start_time = std::chrono::steady_clock::now();
+    int frames_in_this_batch = 0;
+    
+    // Create a reusable scaling context
+    SwsContext* sws_ctx = NULL;
+    int prev_width = 0, prev_height = 0;
+    AVPixelFormat prev_format = AV_PIX_FMT_NONE;
+    
+    FrameData frame_data;
+    
+    while (frame_queue->pop(frame_data)) {
+        auto format_start = std::chrono::steady_clock::now();
+        AVFrame* frame = frame_data.frame;
+        
+        // Create BGR frame
+        AVFrame* bgr_frame = av_frame_alloc();
+        if (!bgr_frame) {
+            std::cerr << "Could not allocate BGR frame" << std::endl;
+            av_frame_free(&frame);
+            continue;
+        }
+        
+        // Allocate buffer for BGR data
+        uint8_t* buffer = (uint8_t*)av_malloc(av_image_get_buffer_size(AV_PIX_FMT_BGR24,
+                                             frame->width, frame->height, 1));
+        if (!buffer) {
+            std::cerr << "Could not allocate buffer for BGR conversion" << std::endl;
+            av_frame_free(&bgr_frame);
+            av_frame_free(&frame);
+            continue;
+        }
+        
+        // Setup BGR frame
+        av_image_fill_arrays(bgr_frame->data, bgr_frame->linesize, buffer,
+                           AV_PIX_FMT_BGR24, frame->width, frame->height, 1);
+        
+        // If frame dimensions or format changed, recreate scaling context
+        if (!sws_ctx || 
+            prev_width != frame->width || 
+            prev_height != frame->height || 
+            prev_format != frame->format) {
+            
+            // Free old context if it exists
+            if (sws_ctx) sws_freeContext(sws_ctx);
+            
+            // Create new scaling context with hardware acceleration if available
+            int flags = SWS_BILINEAR;
+            // FFmpeg's scaling context with hardware acceleration
+            if (hw_accel_available) {
+                // Note: FFmpeg's hardware acceleration is used internally
+                // No need for explicit SWS_CUDA flag as it might not be defined
+                std::cout << "Setting up hardware-accelerated scaling context for "
+                         << frame->width << "x" << frame->height << " frame" << std::endl;
+            }
+            
+            sws_ctx = sws_getContext(
+                frame->width, frame->height, (AVPixelFormat)frame->format,
+                frame->width, frame->height, AV_PIX_FMT_BGR24,
+                flags, NULL, NULL, NULL);
+                
+            if (!sws_ctx) {
+                std::cerr << "Could not initialize conversion context" << std::endl;
+                av_freep(&buffer);
+                av_frame_free(&bgr_frame);
+                av_frame_free(&frame);
+                continue;
+            }
+            
+            // Save current dimensions and format
+            prev_width = frame->width;
+            prev_height = frame->height;
+            prev_format = (AVPixelFormat)frame->format;
+        }
+        
+        // Perform the conversion
+        int result = sws_scale(sws_ctx, frame->data, frame->linesize, 0, frame->height,
+                              bgr_frame->data, bgr_frame->linesize);
+        
+        if (result <= 0) {
+            std::cerr << "Error during frame conversion" << std::endl;
+            av_freep(&buffer);
+            av_frame_free(&bgr_frame);
+            av_frame_free(&frame);
+            continue;
+        }
+        
+        // Send frame metadata first (width, height)
+        std::string metadata = std::to_string(frame->width) + "," +
+                             std::to_string(frame->height) + "," +
+                             std::to_string(frame_counter++);
+        
+        zmq::message_t meta_msg(metadata.size());
+        memcpy(meta_msg.data(), metadata.c_str(), metadata.size());
+        socket.send(meta_msg, zmq::send_flags::sndmore);
+        
+        // Send the actual frame data
+        size_t frame_size = frame->width * frame->height * 3;
+        zmq::message_t frame_msg(frame_size);
+        
+        // Copy BGR data considering stride
+        uint8_t* dst = (uint8_t*)frame_msg.data();
+        for (int y = 0; y < frame->height; y++) {
+            memcpy(dst + y * frame->width * 3,
+                  bgr_frame->data[0] + y * bgr_frame->linesize[0],
+                  frame->width * 3);
+        }
+        
+        auto format_end = std::chrono::steady_clock::now();
+        auto format_time = std::chrono::duration_cast<std::chrono::milliseconds>(format_end - format_start).count();
+        
+        frames_in_this_batch++;
+        
+        // Periodically report performance
+        if (frame_counter % 100 == 0) {
+            auto now = std::chrono::steady_clock::now();
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - perf_start_time).count();
+            double fps = (elapsed > 0) ? (1000.0 * frames_in_this_batch / elapsed) : 0;
+            
+            std::cout << "Frame " << frame_counter 
+                     << " | Format conversion time: " << format_time << "ms"
+                     << " | Avg FPS: " << std::fixed << std::setprecision(1) << fps 
+                     << (hw_accel_available ? " (HW accelerated)" : " (SW)") << std::endl;
+                     
+            // Reset batch counters
+            perf_start_time = now;
+            frames_in_this_batch = 0;
+        }
+        
+        socket.send(frame_msg, zmq::send_flags::none);
+        
+        // Clean up
+        av_freep(&buffer);
+        av_frame_free(&bgr_frame);
+        av_frame_free(&frame);
+    }
+    
+    // Clean up scaling context
+    if (sws_ctx) sws_freeContext(sws_ctx);
+    
+    // Clean up hardware context
+    if (hw_device_ctx) av_buffer_unref(&hw_device_ctx);
+    
+    std::cout << "Frame processing finished" << std::endl;
+}
+
 int main(int argc, char* argv[]) {
     // Expecting 1 arguments: program, input_url
     if (argc < 2) {
@@ -448,6 +618,10 @@ int main(int argc, char* argv[]) {
 
     std::atomic<bool> decode_finished(false);
 
+    FrameQueue* frame_queue = new FrameQueue();
+
+    std::thread processing_thread(process_frames_for_yolo, frame_queue);
+
     // Initialize decoder
     DecoderInfo decoder_info;
     if (!initialize_decoder(input_url, decoder_info)) {
@@ -455,9 +629,6 @@ int main(int argc, char* argv[]) {
         avformat_network_deinit();
         return 1;
     }
-
-    // Prepare frame queues for each encoder
-    FrameQueue* frame_queue = new FrameQueue();
 
     // Start decoder thread
     std::thread decoder_thread([&]() {
@@ -468,6 +639,7 @@ int main(int argc, char* argv[]) {
 
     // Wait for threads to finish
     decoder_thread.join();
+    processing_thread.join();
 
     // Clean up frame queues
     delete frame_queue;
