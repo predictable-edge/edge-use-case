@@ -64,6 +64,7 @@ def process_frames_with_yolo(
     try:
         print("Waiting for frames...")
         while True:
+            pass
             # Receive frame metadata
             metadata = socket.recv_string()
             width, height, frame_num = map(int, metadata.split(','))

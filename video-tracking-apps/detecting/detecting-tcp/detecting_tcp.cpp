@@ -15,7 +15,9 @@
 #include <vector>
 #include <filesystem>
 #include <zmq.hpp>
-#include <opencv2/opencv.hpp>
+#include <vector>
+#include <memory>
+#include <fstream>
 
 // FFmpeg includes
 extern "C" {
@@ -444,6 +446,7 @@ void process_frames_for_yolo(FrameQueue* frame_queue) {
     std::cout << "Frame processing started, waiting for subscriber..." << std::endl;
 
     // Initialize hardware context for FFmpeg
+    // Initialize hardware acceleration for FFmpeg
     AVBufferRef* hw_device_ctx = NULL;
     bool hw_accel_available = false;
     
@@ -480,19 +483,10 @@ void process_frames_for_yolo(FrameQueue* frame_queue) {
             continue;
         }
         
-        // Allocate buffer for BGR data
-        uint8_t* buffer = (uint8_t*)av_malloc(av_image_get_buffer_size(AV_PIX_FMT_BGR24,
-                                             frame->width, frame->height, 1));
-        if (!buffer) {
-            std::cerr << "Could not allocate buffer for BGR conversion" << std::endl;
-            av_frame_free(&bgr_frame);
-            av_frame_free(&frame);
-            continue;
-        }
-        
-        // Setup BGR frame
-        av_image_fill_arrays(bgr_frame->data, bgr_frame->linesize, buffer,
-                           AV_PIX_FMT_BGR24, frame->width, frame->height, 1);
+        // Set basic frame properties
+        bgr_frame->width = frame->width;
+        bgr_frame->height = frame->height;
+        bgr_frame->format = AV_PIX_FMT_BGR24;
         
         // If frame dimensions or format changed, recreate scaling context
         if (!sws_ctx || 
@@ -507,8 +501,7 @@ void process_frames_for_yolo(FrameQueue* frame_queue) {
             int flags = SWS_BILINEAR;
             // FFmpeg's scaling context with hardware acceleration
             if (hw_accel_available) {
-                // Note: FFmpeg's hardware acceleration is used internally
-                // No need for explicit SWS_CUDA flag as it might not be defined
+                // Hardware acceleration is used internally by FFmpeg
                 std::cout << "Setting up hardware-accelerated scaling context for "
                          << frame->width << "x" << frame->height << " frame" << std::endl;
             }
@@ -520,7 +513,6 @@ void process_frames_for_yolo(FrameQueue* frame_queue) {
                 
             if (!sws_ctx) {
                 std::cerr << "Could not initialize conversion context" << std::endl;
-                av_freep(&buffer);
                 av_frame_free(&bgr_frame);
                 av_frame_free(&frame);
                 continue;
@@ -532,18 +524,6 @@ void process_frames_for_yolo(FrameQueue* frame_queue) {
             prev_format = (AVPixelFormat)frame->format;
         }
         
-        // Perform the conversion
-        int result = sws_scale(sws_ctx, frame->data, frame->linesize, 0, frame->height,
-                              bgr_frame->data, bgr_frame->linesize);
-        
-        if (result <= 0) {
-            std::cerr << "Error during frame conversion" << std::endl;
-            av_freep(&buffer);
-            av_frame_free(&bgr_frame);
-            av_frame_free(&frame);
-            continue;
-        }
-        
         // Send frame metadata first (width, height)
         std::string metadata = std::to_string(frame->width) + "," +
                              std::to_string(frame->height) + "," +
@@ -553,16 +533,25 @@ void process_frames_for_yolo(FrameQueue* frame_queue) {
         memcpy(meta_msg.data(), metadata.c_str(), metadata.size());
         socket.send(meta_msg, zmq::send_flags::sndmore);
         
-        // Send the actual frame data
+        // Create ZMQ message for frame data - this will be our direct output buffer
         size_t frame_size = frame->width * frame->height * 3;
         zmq::message_t frame_msg(frame_size);
         
-        // Copy BGR data considering stride
-        uint8_t* dst = (uint8_t*)frame_msg.data();
-        for (int y = 0; y < frame->height; y++) {
-            memcpy(dst + y * frame->width * 3,
-                  bgr_frame->data[0] + y * bgr_frame->linesize[0],
-                  frame->width * 3);
+        // OPTIMIZATION: Set up bgr_frame to directly use ZMQ message's memory
+        // This eliminates the need for additional memcpy operations
+        bgr_frame->data[0] = (uint8_t*)frame_msg.data();
+        // No padding - use exact width * 3 bytes per row
+        bgr_frame->linesize[0] = frame->width * 3;
+        
+        // Perform the conversion directly to ZMQ buffer
+        int result = sws_scale(sws_ctx, frame->data, frame->linesize, 0, frame->height,
+                              bgr_frame->data, bgr_frame->linesize);
+        
+        if (result <= 0) {
+            std::cerr << "Error during frame conversion" << std::endl;
+            av_frame_free(&bgr_frame);
+            av_frame_free(&frame);
+            continue;
         }
         
         auto format_end = std::chrono::steady_clock::now();
@@ -586,10 +575,10 @@ void process_frames_for_yolo(FrameQueue* frame_queue) {
             frames_in_this_batch = 0;
         }
         
+        // Send the frame data
         socket.send(frame_msg, zmq::send_flags::none);
         
         // Clean up
-        av_freep(&buffer);
         av_frame_free(&bgr_frame);
         av_frame_free(&frame);
     }
@@ -619,7 +608,6 @@ int main(int argc, char* argv[]) {
     std::atomic<bool> decode_finished(false);
 
     FrameQueue* frame_queue = new FrameQueue();
-
     std::thread processing_thread(process_frames_for_yolo, frame_queue);
 
     // Initialize decoder
