@@ -179,7 +179,6 @@ def process_frames_with_yolo(
             
             # Run YOLO on frame
             results = model.predict(frame_array, conf=conf, verbose=False)
-            inference_time = (time.time() - start_time) * 1000  # Convert to ms
             
             # Get detection count
             boxes = results[0].boxes
@@ -208,6 +207,9 @@ def process_frames_with_yolo(
             # Send detection results via TCP
             if client_socket:
                 send_detection_results(client_socket, frame_num, detections_list)
+            inference_time = (time.time() - start_time) * 1000  # Convert to ms
+            # timestamp_ms = int(time.monotonic() * 1000)
+            # print(f"Inference finished: {timestamp_ms}")
             
             # Log results
             if frame_count % 10 == 0:

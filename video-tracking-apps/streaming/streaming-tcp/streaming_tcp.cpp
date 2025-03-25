@@ -294,6 +294,7 @@ void* receive_yolo_results(void* args) {
                 
                 // Extract only the frame number from the JSON
                 int frame_num = extract_frame_number(json_obj);
+                frame_num += 1;
                 if (frame_num >= 0 && frame_timestamps.find(frame_num) != frame_timestamps.end()) {
                     // Calculate latency
                     int64_t receive_time_ms = get_current_time_us() / 1000;
