@@ -363,7 +363,8 @@ void decoding_thread(AVCodecContext* decoder_ctx, PacketQueue& packet_queue, Fra
     while (packet_queue.pop(packet)) {
         auto decode_start = std::chrono::steady_clock::now();
         int ret = avcodec_send_packet(decoder_ctx, packet);
-        // std::cout << "Decode start: " << std::chrono::duration_cast<std::chrono::milliseconds>(decode_start.time_since_epoch()).count() << std::endl;
+        std::cout << "Frame number: " << frame_number << " "
+                  << "Decode start: " << std::chrono::duration_cast<std::chrono::milliseconds>(decode_start.time_since_epoch()).count() << std::endl;
         av_packet_free(&packet);
         if (ret < 0) {
             std::cerr << "Error sending packet to decoder: " << get_error_text(ret) << std::endl;

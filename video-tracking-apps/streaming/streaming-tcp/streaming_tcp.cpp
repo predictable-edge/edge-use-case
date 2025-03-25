@@ -170,20 +170,16 @@ std::string get_timestamp_with_ms() {
     return oss.str();
 }
 
-// Function to extract just the frame number from the JSON response
-int extract_frame_number(const std::string& json_str) {
-    // Simple extraction of frame number from JSON
-    size_t frame_pos = json_str.find("\"frame\":");
-    if (frame_pos != std::string::npos) {
-        size_t colon_pos = json_str.find(':', frame_pos);
-        size_t comma_pos = json_str.find(',', colon_pos);
-        if (comma_pos != std::string::npos && colon_pos != std::string::npos) {
-            std::string frame_str = json_str.substr(colon_pos + 1, comma_pos - colon_pos - 1);
-            try {
-                return std::stoi(frame_str);
-            } catch (...) {
-                return -1;
-            }
+// Function to extract frame number from a simple message format
+int extract_frame_number(const std::string& message) {
+    // Format is expected to be "FRAME:123" 
+    const std::string prefix = "FRAME:";
+    if (message.find(prefix) == 0) {
+        std::string frame_str = message.substr(prefix.length());
+        try {
+            return std::stoi(frame_str);
+        } catch (...) {
+            return -1;
         }
     }
     return -1;
@@ -252,7 +248,7 @@ void* receive_yolo_results(void* args) {
     
     // Buffer for receiving data
     char buffer[4096];
-    std::string json_data;
+    std::string msg_data;
     
     // Variables to track idle time once all frames are sent
     time_t last_activity_time = time(NULL);
@@ -282,19 +278,18 @@ void* receive_yolo_results(void* args) {
             // Update last activity time
             last_activity_time = time(NULL);
             
-            // Add received data to json_data buffer
-            json_data.append(buffer, bytes_read);
+            // Add received data to message buffer
+            msg_data.append(buffer, bytes_read);
             
-            // Process complete JSON objects (delimited by newlines)
+            // Process complete messages (delimited by newlines)
             size_t newline_pos;
-            while ((newline_pos = json_data.find('\n')) != std::string::npos) {
-                // Extract one JSON object
-                std::string json_obj = json_data.substr(0, newline_pos);
-                json_data.erase(0, newline_pos + 1);
+            while ((newline_pos = msg_data.find('\n')) != std::string::npos) {
+                // Extract one message
+                std::string message = msg_data.substr(0, newline_pos);
+                msg_data.erase(0, newline_pos + 1);
                 
-                // Extract only the frame number from the JSON
-                int frame_num = extract_frame_number(json_obj);
-                frame_num += 1;
+                // Extract frame number from message
+                int frame_num = extract_frame_number(message);
                 if (frame_num >= 0 && frame_timestamps.find(frame_num) != frame_timestamps.end()) {
                     // Calculate latency
                     int64_t receive_time_ms = get_current_time_us() / 1000;

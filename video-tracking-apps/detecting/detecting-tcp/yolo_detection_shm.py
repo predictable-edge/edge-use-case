@@ -10,7 +10,6 @@ import posix_ipc
 import signal
 import sys
 import socket
-import json
 import threading
 
 def ensure_dir(directory):
@@ -62,20 +61,15 @@ def setup_tcp_server(port=9001):
     
     return server_socket, client_socket
 
-def send_detection_results(client_socket, frame_num, detections):
-    """Send detection results over TCP."""
+def send_detection_results(client_socket, frame_num, _):
+    """Send frame number over TCP in a simple format."""
     if client_socket is None:
         return
     
-    results_data = {
-        "frame": frame_num,
-        "detections": detections
-    }
-    
-    # Convert to JSON and send
-    json_data = json.dumps(results_data) + '\n'  # Add newline as delimiter
+    # Send simple frame number message
+    message = f"FRAME:{frame_num}\n"
     try:
-        client_socket.sendall(json_data.encode('utf-8'))
+        client_socket.sendall(message.encode('utf-8'))
     except Exception as e:
         print(f"Error sending detection results: {e}")
 
@@ -184,32 +178,13 @@ def process_frames_with_yolo(
             boxes = results[0].boxes
             num_detections = len(boxes)
             
-            # Prepare detection results for TCP transmission
-            detections_list = []
-            for i, box in enumerate(boxes):
-                # Extract box coordinates (normalized format)
-                x1, y1, x2, y2 = box.xyxyn[0].cpu().numpy()
-                
-                # Extract class information
-                cls_id = int(box.cls[0].item())
-                cls_name = model.names[cls_id]
-                confidence = float(box.conf[0].item())
-                
-                # Add to detections list
-                detections_list.append({
-                    "id": i,
-                    "class_id": cls_id,
-                    "class_name": cls_name,
-                    "confidence": confidence,
-                    "bbox": [float(x1), float(y1), float(x2), float(y2)]
-                })
-            
-            # Send detection results via TCP
+            # Send frame number via TCP (simplified)
             if client_socket:
-                send_detection_results(client_socket, frame_num, detections_list)
+                send_detection_results(client_socket, frame_num, None)
+            
             inference_time = (time.time() - start_time) * 1000  # Convert to ms
-            # timestamp_ms = int(time.monotonic() * 1000)
-            # print(f"Inference finished: {timestamp_ms}")
+            timestamp_ms = int(time.monotonic() * 1000)
+            print(f"Frame {frame_num} finished: {timestamp_ms}")
             
             # Log results
             if frame_count % 10 == 0:
