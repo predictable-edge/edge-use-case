@@ -18,6 +18,10 @@
 #include <vector>
 #include <memory>
 #include <fstream>
+#include <sys/mman.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <semaphore.h>
 
 // FFmpeg includes
 extern "C" {
@@ -592,6 +596,459 @@ void process_frames_for_yolo(FrameQueue* frame_queue) {
     std::cout << "Frame processing finished" << std::endl;
 }
 
+void process_frames_for_yolo_shm(FrameQueue* frame_queue) {
+    // Define shared memory parameters
+    const std::string SHM_NAME = "/yolo_frame_buffer";
+    const std::string SEM_READY_NAME = "/frame_ready";
+    const std::string SEM_PROCESSED_NAME = "/frame_processed";
+    const size_t MAX_FRAME_SIZE = 4096 * 2160 * 3; // Max frame size (4K resolution)
+    const size_t METADATA_SIZE = 256; // Space for metadata
+    const size_t BUFFER_SIZE = MAX_FRAME_SIZE + METADATA_SIZE;
+    
+    // Create shared memory
+    int shm_fd = shm_open(SHM_NAME.c_str(), O_CREAT | O_RDWR, 0666);
+    if (shm_fd == -1) {
+        std::cerr << "Error creating shared memory: " << strerror(errno) << std::endl;
+        return;
+    }
+    
+    // Set the size of shared memory
+    if (ftruncate(shm_fd, BUFFER_SIZE) == -1) {
+        std::cerr << "Error setting shared memory size: " << strerror(errno) << std::endl;
+        close(shm_fd);
+        shm_unlink(SHM_NAME.c_str());
+        return;
+    }
+    
+    // Map shared memory to process address space
+    void* shm_ptr = mmap(NULL, BUFFER_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
+    if (shm_ptr == MAP_FAILED) {
+        std::cerr << "Error mapping shared memory: " << strerror(errno) << std::endl;
+        close(shm_fd);
+        shm_unlink(SHM_NAME.c_str());
+        return;
+    }
+    
+    // Create semaphores for synchronization
+    sem_t* sem_ready = sem_open(SEM_READY_NAME.c_str(), O_CREAT, 0666, 0);
+    sem_t* sem_processed = sem_open(SEM_PROCESSED_NAME.c_str(), O_CREAT, 0666, 1);
+    
+    if (sem_ready == SEM_FAILED || sem_processed == SEM_FAILED) {
+        std::cerr << "Error creating semaphores: " << strerror(errno) << std::endl;
+        munmap(shm_ptr, BUFFER_SIZE);
+        close(shm_fd);
+        shm_unlink(SHM_NAME.c_str());
+        return;
+    }
+    
+    std::cout << "Shared memory and semaphores initialized" << std::endl;
+    std::cout << "Frame processing started, waiting for consumer..." << std::endl;
+
+    // Initialize hardware context for FFmpeg
+    AVBufferRef* hw_device_ctx = NULL;
+    bool hw_accel_available = false;
+    
+    int err = av_hwdevice_ctx_create(&hw_device_ctx, AV_HWDEVICE_TYPE_CUDA, NULL, NULL, 0);
+    if (err >= 0) {
+        hw_accel_available = true;
+        std::cout << "CUDA hardware acceleration available for FFmpeg conversions" << std::endl;
+    } else {
+        std::cout << "CUDA hardware acceleration not available, using software conversion: " 
+                 << get_error_text(err) << std::endl;
+    }
+
+    // Performance tracking
+    int frame_counter = 0;
+    auto perf_start_time = std::chrono::steady_clock::now();
+    int frames_in_this_batch = 0;
+    
+    // Create a reusable scaling context
+    SwsContext* sws_ctx = NULL;
+    int prev_width = 0, prev_height = 0;
+    AVPixelFormat prev_format = AV_PIX_FMT_NONE;
+    
+    // Pre-allocate a BGR frame to reuse
+    AVFrame* bgr_frame = av_frame_alloc();
+    if (!bgr_frame) {
+        std::cerr << "Could not allocate BGR frame" << std::endl;
+        return;
+    }
+    
+    // Setup pointers to shared memory regions
+    uint8_t* metadata_ptr = (uint8_t*)shm_ptr;
+    uint8_t* frame_data_ptr = metadata_ptr + METADATA_SIZE;
+    
+    FrameData frame_data;
+    
+    while (frame_queue->pop(frame_data)) {
+        // Wait for consumer to signal it's done with previous frame
+        sem_wait(sem_processed);
+        
+        auto format_start = std::chrono::steady_clock::now();
+        AVFrame* frame = frame_data.frame;
+        
+        // Set basic frame properties
+        bgr_frame->width = frame->width;
+        bgr_frame->height = frame->height;
+        bgr_frame->format = AV_PIX_FMT_BGR24;
+        
+        // Write metadata to shared memory
+        std::string metadata = std::to_string(frame->width) + "," +
+                             std::to_string(frame->height) + "," +
+                             std::to_string(frame_counter++);
+        
+        // Ensure we don't overflow metadata area
+        if (metadata.size() >= METADATA_SIZE - 1) {
+            metadata.resize(METADATA_SIZE - 1);
+        }
+        
+        // Copy metadata to shared memory and null-terminate
+        std::copy(metadata.begin(), metadata.end(), metadata_ptr);
+        metadata_ptr[metadata.size()] = '\0';
+        
+        // If frame dimensions or format changed, recreate scaling context
+        if (!sws_ctx || 
+            prev_width != frame->width || 
+            prev_height != frame->height || 
+            prev_format != frame->format) {
+            
+            // Free old context if it exists
+            if (sws_ctx) sws_freeContext(sws_ctx);
+            
+            // Create new scaling context with hardware acceleration if available
+            int flags = SWS_BILINEAR;
+            
+            if (hw_accel_available) {
+                // Hardware acceleration is used internally by FFmpeg
+                std::cout << "Setting up hardware-accelerated scaling context for "
+                         << frame->width << "x" << frame->height << " frame" << std::endl;
+            }
+            
+            sws_ctx = sws_getContext(
+                frame->width, frame->height, (AVPixelFormat)frame->format,
+                frame->width, frame->height, AV_PIX_FMT_BGR24,
+                flags, NULL, NULL, NULL);
+                
+            if (!sws_ctx) {
+                std::cerr << "Could not initialize conversion context" << std::endl;
+                av_frame_free(&frame);
+                sem_post(sem_processed);  // Signal we're done even though we failed
+                continue;
+            }
+            
+            // Save current dimensions and format
+            prev_width = frame->width;
+            prev_height = frame->height;
+            prev_format = (AVPixelFormat)frame->format;
+        }
+        
+        // Setup BGR frame to use shared memory for output
+        bgr_frame->data[0] = frame_data_ptr;
+        bgr_frame->linesize[0] = frame->width * 3;
+        
+        // Perform the conversion directly to shared memory buffer
+        int result = sws_scale(sws_ctx, frame->data, frame->linesize, 0, frame->height,
+                              bgr_frame->data, bgr_frame->linesize);
+        
+        if (result <= 0) {
+            std::cerr << "Error during frame conversion" << std::endl;
+            av_frame_free(&frame);
+            sem_post(sem_processed);  // Signal we're done even though we failed
+            continue;
+        }
+        
+        auto format_end = std::chrono::steady_clock::now();
+        auto format_time = std::chrono::duration_cast<std::chrono::milliseconds>(format_end - format_start).count();
+        
+        frames_in_this_batch++;
+        
+        // Periodically report performance
+        if (frame_counter % 100 == 0) {
+            auto now = std::chrono::steady_clock::now();
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - perf_start_time).count();
+            double fps = (elapsed > 0) ? (1000.0 * frames_in_this_batch / elapsed) : 0;
+            
+            std::cout << "Frame " << frame_counter 
+                     << " | Format conversion time: " << format_time << "ms"
+                     << " | Avg FPS: " << std::fixed << std::setprecision(1) << fps 
+                     << (hw_accel_available ? " (HW accelerated)" : " (SW)") << std::endl;
+                     
+            // Reset batch counters
+            perf_start_time = now;
+            frames_in_this_batch = 0;
+        }
+        
+        // Clean up frame
+        av_frame_free(&frame);
+        
+        // Signal to consumer that new frame is ready
+        sem_post(sem_ready);
+    }
+    
+    // Clean up scaling context
+    if (sws_ctx) sws_freeContext(sws_ctx);
+    
+    // Clean up hardware context
+    if (hw_device_ctx) av_buffer_unref(&hw_device_ctx);
+    
+    // Clean up shared memory and semaphores
+    av_frame_free(&bgr_frame);
+    munmap(shm_ptr, BUFFER_SIZE);
+    close(shm_fd);
+    shm_unlink(SHM_NAME.c_str());
+    sem_close(sem_ready);
+    sem_close(sem_processed);
+    sem_unlink(SEM_READY_NAME.c_str());
+    sem_unlink(SEM_PROCESSED_NAME.c_str());
+    
+    std::cout << "Frame processing finished" << std::endl;
+}
+
+// Define ring buffer structure for shared memory
+struct SharedRingBuffer {
+    int buffer_size;           // Number of frames in ring buffer
+    int frame_width;           // Current frame width
+    int frame_height;          // Current frame height
+    int write_index;           // Producer write position
+    int read_index;            // Consumer read position
+    int format_change;         // Flag to indicate format change
+    size_t frame_data_offset;  // Offset to start of frame data
+    size_t frame_size;         // Size of each frame in bytes
+};
+
+void process_frames_for_yolo_ringbuf(FrameQueue* frame_queue) {
+    // Define shared memory parameters
+    const std::string SHM_NAME = "/yolo_frame_ringbuf";
+    const std::string SEM_SLOTS_EMPTY_NAME = "/sem_slots_empty";
+    const std::string SEM_SLOTS_FILLED_NAME = "/sem_slots_filled";
+    const std::string SEM_MUTEX_NAME = "/sem_mutex";
+    const int RING_BUFFER_SIZE = 10;  // Number of frames in ring buffer
+    const size_t MAX_FRAME_SIZE = 4096 * 2160 * 3; // Max frame size (4K resolution)
+    const size_t TOTAL_SIZE = sizeof(SharedRingBuffer) + (MAX_FRAME_SIZE * RING_BUFFER_SIZE);
+    
+    // Create shared memory
+    int shm_fd = shm_open(SHM_NAME.c_str(), O_CREAT | O_RDWR, 0666);
+    if (shm_fd == -1) {
+        std::cerr << "Error creating shared memory: " << strerror(errno) << std::endl;
+        return;
+    }
+    
+    // Set the size of shared memory
+    if (ftruncate(shm_fd, TOTAL_SIZE) == -1) {
+        std::cerr << "Error setting shared memory size: " << strerror(errno) << std::endl;
+        close(shm_fd);
+        shm_unlink(SHM_NAME.c_str());
+        return;
+    }
+    
+    // Map shared memory to process address space
+    void* shm_ptr = mmap(NULL, TOTAL_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
+    if (shm_ptr == MAP_FAILED) {
+        std::cerr << "Error mapping shared memory: " << strerror(errno) << std::endl;
+        close(shm_fd);
+        shm_unlink(SHM_NAME.c_str());
+        return;
+    }
+    
+    // Initialize shared memory header
+    SharedRingBuffer* ring_buffer = static_cast<SharedRingBuffer*>(shm_ptr);
+    ring_buffer->buffer_size = RING_BUFFER_SIZE;
+    ring_buffer->write_index = 0;
+    ring_buffer->read_index = 0;
+    ring_buffer->frame_width = 0;
+    ring_buffer->frame_height = 0;
+    ring_buffer->format_change = 0;
+    ring_buffer->frame_data_offset = sizeof(SharedRingBuffer);
+    ring_buffer->frame_size = MAX_FRAME_SIZE;
+    
+    // Create semaphores for synchronization
+    sem_t* sem_slots_empty = sem_open(SEM_SLOTS_EMPTY_NAME.c_str(), O_CREAT, 0666, RING_BUFFER_SIZE);
+    sem_t* sem_slots_filled = sem_open(SEM_SLOTS_FILLED_NAME.c_str(), O_CREAT, 0666, 0);
+    sem_t* sem_mutex = sem_open(SEM_MUTEX_NAME.c_str(), O_CREAT, 0666, 1);
+    
+    if (sem_slots_empty == SEM_FAILED || sem_slots_filled == SEM_FAILED || sem_mutex == SEM_FAILED) {
+        std::cerr << "Error creating semaphores: " << strerror(errno) << std::endl;
+        munmap(shm_ptr, TOTAL_SIZE);
+        close(shm_fd);
+        shm_unlink(SHM_NAME.c_str());
+        return;
+    }
+    
+    std::cout << "Ring buffer initialized with " << RING_BUFFER_SIZE << " slots" << std::endl;
+    std::cout << "Frame processing started, waiting for consumer..." << std::endl;
+
+    // Initialize hardware context for FFmpeg
+    AVBufferRef* hw_device_ctx = NULL;
+    bool hw_accel_available = false;
+    
+    int err = av_hwdevice_ctx_create(&hw_device_ctx, AV_HWDEVICE_TYPE_CUDA, NULL, NULL, 0);
+    if (err >= 0) {
+        hw_accel_available = true;
+        std::cout << "CUDA hardware acceleration available for FFmpeg conversions" << std::endl;
+    } else {
+        std::cout << "CUDA hardware acceleration not available, using software conversion: " 
+                 << get_error_text(err) << std::endl;
+    }
+
+    // Performance tracking
+    int frame_counter = 0;
+    auto perf_start_time = std::chrono::steady_clock::now();
+    int frames_in_this_batch = 0;
+    
+    // Create a reusable scaling context
+    SwsContext* sws_ctx = NULL;
+    int prev_width = 0, prev_height = 0;
+    AVPixelFormat prev_format = AV_PIX_FMT_NONE;
+    
+    // Pre-allocate a BGR frame to reuse
+    AVFrame* bgr_frame = av_frame_alloc();
+    if (!bgr_frame) {
+        std::cerr << "Could not allocate BGR frame" << std::endl;
+        return;
+    }
+    
+    FrameData frame_data;
+    
+    while (frame_queue->pop(frame_data)) {
+        auto format_start = std::chrono::steady_clock::now();
+        AVFrame* frame = frame_data.frame;
+        
+        // Wait for an empty slot in the ring buffer
+        sem_wait(sem_slots_empty);
+        
+        // Acquire mutex to update buffer state
+        sem_wait(sem_mutex);
+        
+        // Get current write position
+        int current_write_idx = ring_buffer->write_index;
+        uint8_t* frame_data_ptr = static_cast<uint8_t*>(shm_ptr) + 
+                                 ring_buffer->frame_data_offset + 
+                                 (current_write_idx * ring_buffer->frame_size);
+        
+        // Check if frame dimensions changed
+        bool dimensions_changed = (ring_buffer->frame_width != frame->width || 
+                                  ring_buffer->frame_height != frame->height);
+        
+        // Update frame dimensions in header if changed
+        if (dimensions_changed) {
+            ring_buffer->frame_width = frame->width;
+            ring_buffer->frame_height = frame->height;
+            ring_buffer->format_change = 1;  // Signal format change to consumer
+        }
+        
+        // Increment write index (circular)
+        ring_buffer->write_index = (current_write_idx + 1) % ring_buffer->buffer_size;
+        
+        // Release mutex
+        sem_post(sem_mutex);
+        
+        // Set basic frame properties
+        bgr_frame->width = frame->width;
+        bgr_frame->height = frame->height;
+        bgr_frame->format = AV_PIX_FMT_BGR24;
+        
+        // If frame dimensions or format changed, recreate scaling context
+        if (!sws_ctx || 
+            prev_width != frame->width || 
+            prev_height != frame->height || 
+            prev_format != frame->format) {
+            
+            // Free old context if it exists
+            if (sws_ctx) sws_freeContext(sws_ctx);
+            
+            // Create new scaling context with hardware acceleration if available
+            int flags = SWS_BILINEAR;
+            
+            if (hw_accel_available) {
+                std::cout << "Setting up hardware-accelerated scaling context for "
+                         << frame->width << "x" << frame->height << " frame" << std::endl;
+            }
+            
+            sws_ctx = sws_getContext(
+                frame->width, frame->height, (AVPixelFormat)frame->format,
+                frame->width, frame->height, AV_PIX_FMT_BGR24,
+                flags, NULL, NULL, NULL);
+                
+            if (!sws_ctx) {
+                std::cerr << "Could not initialize conversion context" << std::endl;
+                av_frame_free(&frame);
+                sem_post(sem_slots_empty);  // Return the slot
+                continue;
+            }
+            
+            // Save current dimensions and format
+            prev_width = frame->width;
+            prev_height = frame->height;
+            prev_format = (AVPixelFormat)frame->format;
+        }
+        
+        // Setup BGR frame to use shared memory for output
+        bgr_frame->data[0] = frame_data_ptr;
+        bgr_frame->linesize[0] = frame->width * 3;
+        
+        // Perform the conversion directly to shared memory buffer
+        int result = sws_scale(sws_ctx, frame->data, frame->linesize, 0, frame->height,
+                              bgr_frame->data, bgr_frame->linesize);
+        
+        if (result <= 0) {
+            std::cerr << "Error during frame conversion" << std::endl;
+            av_frame_free(&frame);
+            sem_post(sem_slots_empty);  // Return the slot
+            continue;
+        }
+        
+        auto format_end = std::chrono::steady_clock::now();
+        auto format_time = std::chrono::duration_cast<std::chrono::milliseconds>(format_end - format_start).count();
+        
+        frames_in_this_batch++;
+        frame_counter++;
+        
+        // Periodically report performance
+        if (frame_counter % 100 == 0) {
+            auto now = std::chrono::steady_clock::now();
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - perf_start_time).count();
+            double fps = (elapsed > 0) ? (1000.0 * frames_in_this_batch / elapsed) : 0;
+            
+            std::cout << "Frame " << frame_counter 
+                     << " | Format conversion time: " << format_time << "ms"
+                     << " | Avg FPS: " << std::fixed << std::setprecision(1) << fps 
+                     << (hw_accel_available ? " (HW accelerated)" : " (SW)")
+                     << " | Buffer: W=" << current_write_idx << " R=" << ring_buffer->read_index
+                     << std::endl;
+                     
+            // Reset batch counters
+            perf_start_time = now;
+            frames_in_this_batch = 0;
+        }
+        
+        // Clean up frame
+        av_frame_free(&frame);
+        
+        // Signal that a new frame is available
+        sem_post(sem_slots_filled);
+    }
+    
+    // Clean up scaling context
+    if (sws_ctx) sws_freeContext(sws_ctx);
+    
+    // Clean up hardware context
+    if (hw_device_ctx) av_buffer_unref(&hw_device_ctx);
+    
+    // Clean up shared memory and semaphores
+    av_frame_free(&bgr_frame);
+    munmap(shm_ptr, TOTAL_SIZE);
+    close(shm_fd);
+    shm_unlink(SHM_NAME.c_str());
+    sem_close(sem_slots_empty);
+    sem_close(sem_slots_filled);
+    sem_close(sem_mutex);
+    sem_unlink(SEM_SLOTS_EMPTY_NAME.c_str());
+    sem_unlink(SEM_SLOTS_FILLED_NAME.c_str());
+    sem_unlink(SEM_MUTEX_NAME.c_str());
+    
+    std::cout << "Frame processing finished" << std::endl;
+}
+
 int main(int argc, char* argv[]) {
     // Expecting 1 arguments: program, input_url
     if (argc < 2) {
@@ -608,7 +1065,7 @@ int main(int argc, char* argv[]) {
     std::atomic<bool> decode_finished(false);
 
     FrameQueue* frame_queue = new FrameQueue();
-    std::thread processing_thread(process_frames_for_yolo, frame_queue);
+    std::thread processing_thread(process_frames_for_yolo_shm, frame_queue);
 
     // Initialize decoder
     DecoderInfo decoder_info;
