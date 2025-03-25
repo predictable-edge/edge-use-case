@@ -23,6 +23,9 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <cfloat>
+#include <atomic>   // Added for std::atomic
+#include <fcntl.h>  // Added for fcntl and flags
+#include <errno.h>  // Added for errno
 
 // Include FFmpeg headers
 extern "C" {
