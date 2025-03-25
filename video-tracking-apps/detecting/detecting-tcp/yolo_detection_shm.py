@@ -9,6 +9,9 @@ import mmap
 import posix_ipc
 import signal
 import sys
+import socket
+import json
+import threading
 
 def ensure_dir(directory):
     """Create directory if it doesn't exist."""
@@ -45,12 +48,44 @@ def signal_handler(sig, frame):
     print("\nStopping frame processing...")
     sys.exit(0)
 
+def setup_tcp_server(port=9001):
+    """Setup TCP server for sending detection results."""
+    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server_socket.bind(('0.0.0.0', port))
+    server_socket.listen(1)
+    print(f"TCP server listening on port {port}")
+    
+    # Accept client connection
+    client_socket, client_address = server_socket.accept()
+    print(f"Client connected from {client_address}")
+    
+    return server_socket, client_socket
+
+def send_detection_results(client_socket, frame_num, detections):
+    """Send detection results over TCP."""
+    if client_socket is None:
+        return
+    
+    results_data = {
+        "frame": frame_num,
+        "detections": detections
+    }
+    
+    # Convert to JSON and send
+    json_data = json.dumps(results_data) + '\n'  # Add newline as delimiter
+    try:
+        client_socket.sendall(json_data.encode('utf-8'))
+    except Exception as e:
+        print(f"Error sending detection results: {e}")
+
 def process_frames_with_yolo(
     model_path,
     conf=0.3,
     show=False,
     device='cuda',
-    save_results=True
+    save_results=True,
+    tcp_port=9001
 ):
     """
     Process frames from shared memory with YOLO model
@@ -61,9 +96,19 @@ def process_frames_with_yolo(
         show (bool): Whether to display detection results
         device (str): Device to run YOLO on ('cpu' or 'cuda')
         save_results (bool): Whether to save detection results
+        tcp_port (int): Port to use for TCP communication
     """
     # Setup signal handler for graceful shutdown
     signal.signal(signal.SIGINT, signal_handler)
+    
+    # Setup TCP server for sending detection results
+    server_socket = None
+    client_socket = None
+    try:
+        server_socket, client_socket = setup_tcp_server(tcp_port)
+    except Exception as e:
+        print(f"Failed to setup TCP server: {e}")
+        print("Continuing without TCP communication...")
     
     # Shared memory parameters
     SHM_NAME = "/yolo_frame_buffer"
@@ -140,6 +185,30 @@ def process_frames_with_yolo(
             boxes = results[0].boxes
             num_detections = len(boxes)
             
+            # Prepare detection results for TCP transmission
+            detections_list = []
+            for i, box in enumerate(boxes):
+                # Extract box coordinates (normalized format)
+                x1, y1, x2, y2 = box.xyxyn[0].cpu().numpy()
+                
+                # Extract class information
+                cls_id = int(box.cls[0].item())
+                cls_name = model.names[cls_id]
+                confidence = float(box.conf[0].item())
+                
+                # Add to detections list
+                detections_list.append({
+                    "id": i,
+                    "class_id": cls_id,
+                    "class_name": cls_name,
+                    "confidence": confidence,
+                    "bbox": [float(x1), float(y1), float(x2), float(y2)]
+                })
+            
+            # Send detection results via TCP
+            if client_socket:
+                send_detection_results(client_socket, frame_num, detections_list)
+            
             # Log results
             if frame_count % 10 == 0:
                 print(f"Frame {frame_num}: {inference_time:.2f}ms, {num_detections} objects detected")
@@ -181,6 +250,11 @@ def process_frames_with_yolo(
         if show:
             cv2.destroyAllWindows()
         
+        if client_socket:
+            client_socket.close()
+        if server_socket:
+            server_socket.close()
+            
         cleanup_resources(shm, sem_ready, sem_processed, SHM_NAME, SEM_READY_NAME, SEM_PROCESSED_NAME)
         
         # Print summary
@@ -208,6 +282,8 @@ def parse_args():
                       help='Device to run YOLO on')
     parser.add_argument('--no-save', action='store_false', dest='save',
                       help='Disable saving results')
+    parser.add_argument('--tcp-port', type=int, default=9001,
+                      help='TCP port for sending detection results')
     
     return parser.parse_args()
 
@@ -220,7 +296,8 @@ def main():
         conf=args.conf,
         show=args.show,
         device=args.device,
-        save_results=args.save
+        save_results=args.save,
+        tcp_port=args.tcp_port
     )
 
 if __name__ == "__main__":

@@ -18,6 +18,10 @@
 #include <mutex>
 #include <vector>
 #include <filesystem>
+// Added for TCP client
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 
 // Include FFmpeg headers
 extern "C" {
@@ -30,6 +34,9 @@ extern "C" {
 #include <climits>
 }
 
+// For JSON parsing
+#include <string>
+
 #define CHECK_ERR(err, msg) \
     if ((err) < 0) { \
         char errbuf[AV_ERROR_MAX_STRING_SIZE]; \
@@ -40,6 +47,96 @@ extern "C" {
 
 // Mutex for synchronized console output
 pthread_mutex_t cout_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+// Map to store frame sending timestamps for latency calculation
+std::map<int, int64_t> frame_timestamps;
+
+// Class for handling latency measurements and file output
+class LatencyLogger {
+public:
+    LatencyLogger(const std::string& log_filename) : filename_(log_filename) {
+        // Create directory if it doesn't exist
+        std::filesystem::path filepath(filename_);
+        std::filesystem::path parent_path = filepath.parent_path();
+        try {
+            if (!parent_path.empty() && !std::filesystem::exists(parent_path)) {
+                std::filesystem::create_directories(parent_path);
+                std::cout << "Created directories: " << parent_path << std::endl;
+            }
+        } catch (const std::filesystem::filesystem_error& e) {
+            std::cerr << "Filesystem error: " << e.what() << std::endl;
+        }
+    }
+
+    void add_entry(int frame_number, int64_t send_time_ms, int64_t receive_time_ms) {
+        double latency_ms = receive_time_ms - send_time_ms;
+        
+        // Update statistics
+        frame_count_++;
+        total_latency_ms_ += latency_ms;
+        min_latency_ms_ = std::min(min_latency_ms_, latency_ms);
+        max_latency_ms_ = std::max(max_latency_ms_, latency_ms);
+        
+        // Store entry
+        entries_.push_back({frame_number, latency_ms});
+        
+        // Log to console periodically
+        if (frame_number % 30 == 0) {
+            pthread_mutex_lock(&cout_mutex);
+            printf("[Detection Thread] Frame %d: E2E Latency = %.2f ms\n", 
+                   frame_number, latency_ms);
+            pthread_mutex_unlock(&cout_mutex);
+        }
+    }
+
+    void write_to_file() {
+        std::ofstream ofs(filename_);
+        if (!ofs.is_open()) {
+            std::cerr << "Failed to open " << filename_ << " for writing." << std::endl;
+            return;
+        }
+
+        ofs << std::left << std::setw(10) << "Frame" 
+            << std::left << std::setw(20) << "E2E latency(ms)" 
+            << "\n";
+
+        for (const auto& entry : entries_) {
+            ofs << std::left << std::setw(10) << entry.frame_number
+                << std::left << std::setw(20) << std::to_string(entry.latency_ms) + " ms"
+                << "\n";
+        }
+
+        ofs.close();
+        std::cout << "Timing information written to " << filename_ << std::endl;
+    }
+
+    void print_summary() {
+        if (frame_count_ > 0) {
+            double avg_latency = total_latency_ms_ / frame_count_;
+            pthread_mutex_lock(&cout_mutex);
+            printf("\n[Detection Thread] Latency Statistics:\n");
+            printf("  Frames processed: %d\n", frame_count_);
+            printf("  Average latency: %.2f ms\n", avg_latency);
+            printf("  Minimum latency: %.2f ms\n", min_latency_ms_);
+            printf("  Maximum latency: %.2f ms\n", max_latency_ms_);
+            printf("  Latency log saved to: %s\n", filename_.c_str());
+            pthread_mutex_unlock(&cout_mutex);
+        }
+    }
+
+private:
+    struct LatencyEntry {
+        int frame_number;
+        double latency_ms;
+    };
+
+    std::vector<LatencyEntry> entries_;
+    std::string filename_;
+    int frame_count_ = 0;
+    double total_latency_ms_ = 0.0;
+    double min_latency_ms_ = DBL_MAX;
+    double max_latency_ms_ = 0.0;
+};
 
 // Function to get current time in microseconds
 int64_t get_current_time_us() {
@@ -58,6 +155,141 @@ std::string get_timestamp_with_ms() {
     std::ostringstream oss;
     oss << buffer << std::setw(3) << std::setfill('0') << ms_part.count();
     return oss.str();
+}
+
+// Function to extract just the frame number from the JSON response
+int extract_frame_number(const std::string& json_str) {
+    // Simple extraction of frame number from JSON
+    size_t frame_pos = json_str.find("\"frame\":");
+    if (frame_pos != std::string::npos) {
+        size_t colon_pos = json_str.find(':', frame_pos);
+        size_t comma_pos = json_str.find(',', colon_pos);
+        if (comma_pos != std::string::npos && colon_pos != std::string::npos) {
+            std::string frame_str = json_str.substr(colon_pos + 1, comma_pos - colon_pos - 1);
+            try {
+                return std::stoi(frame_str);
+            } catch (...) {
+                return -1;
+            }
+        }
+    }
+    return -1;
+}
+
+// Function to receive YOLO detection results via TCP
+void* receive_yolo_results(void* args) {
+    char** my_args = (char**)args;
+    char* server_ip = my_args[0];
+    int server_port = atoi(my_args[1]);
+    
+    pthread_mutex_lock(&cout_mutex);
+    printf("[Detection Thread] Starting TCP client to receive YOLO detection results...\n");
+    pthread_mutex_unlock(&cout_mutex);
+    
+    // Setup latency logging
+    std::string timestamp = get_timestamp_with_ms();
+    std::string log_dir = "result/" + timestamp;
+    std::string log_filename = log_dir + "/latency.log";
+    LatencyLogger logger(log_filename);
+    
+    // Create socket
+    int client_fd;
+    struct sockaddr_in server_addr;
+    
+    if ((client_fd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+        pthread_mutex_lock(&cout_mutex);
+        fprintf(stderr, "[Detection Thread] Socket creation error\n");
+        pthread_mutex_unlock(&cout_mutex);
+        return NULL;
+    }
+    
+    // Set up server address
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_port = htons(server_port);
+    
+    // Convert IPv4 and IPv6 addresses from text to binary
+    if (inet_pton(AF_INET, server_ip, &server_addr.sin_addr) <= 0) {
+        pthread_mutex_lock(&cout_mutex);
+        fprintf(stderr, "[Detection Thread] Invalid address or address not supported\n");
+        pthread_mutex_unlock(&cout_mutex);
+        close(client_fd);
+        return NULL;
+    }
+    
+    // Connect to the YOLO server
+    pthread_mutex_lock(&cout_mutex);
+    printf("[Detection Thread] Attempting to connect to %s:%d...\n", server_ip, server_port);
+    pthread_mutex_unlock(&cout_mutex);
+    
+    if (connect(client_fd, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
+        pthread_mutex_lock(&cout_mutex);
+        fprintf(stderr, "[Detection Thread] Connection failed\n");
+        pthread_mutex_unlock(&cout_mutex);
+        close(client_fd);
+        return NULL;
+    }
+    
+    pthread_mutex_lock(&cout_mutex);
+    printf("[Detection Thread] Connected to YOLO detection server\n");
+    pthread_mutex_unlock(&cout_mutex);
+    
+    // Buffer for receiving data
+    char buffer[4096];
+    std::string json_data;
+    
+    // Receive data from server
+    while (true) {
+        memset(buffer, 0, sizeof(buffer));
+        int bytes_read = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
+        
+        if (bytes_read <= 0) {
+            // Connection closed or error
+            pthread_mutex_lock(&cout_mutex);
+            fprintf(stderr, "[Detection Thread] Connection closed or error\n");
+            pthread_mutex_unlock(&cout_mutex);
+            break;
+        }
+        
+        // Add received data to json_data buffer
+        json_data.append(buffer, bytes_read);
+        
+        // Process complete JSON objects (delimited by newlines)
+        size_t newline_pos;
+        while ((newline_pos = json_data.find('\n')) != std::string::npos) {
+            // Extract one JSON object
+            std::string json_obj = json_data.substr(0, newline_pos);
+            json_data.erase(0, newline_pos + 1);
+            
+            // Extract only the frame number from the JSON
+            int frame_num = extract_frame_number(json_obj);
+            if (frame_num >= 0 && frame_timestamps.find(frame_num) != frame_timestamps.end()) {
+                // Calculate latency
+                int64_t receive_time_ms = get_current_time_us() / 1000;
+                int64_t send_time_ms = frame_timestamps[frame_num] / 1000;
+                
+                // Log latency
+                logger.add_entry(frame_num, send_time_ms, receive_time_ms);
+                
+                // Remove from map to avoid memory growth
+                frame_timestamps.erase(frame_num);
+            }
+        }
+    }
+    
+    // Close the socket
+    close(client_fd);
+    
+    // Write latency statistics to file
+    logger.write_to_file();
+    
+    // Print summary
+    logger.print_summary();
+    
+    pthread_mutex_lock(&cout_mutex);
+    printf("[Detection Thread] Finished receiving YOLO detection results\n");
+    pthread_mutex_unlock(&cout_mutex);
+    
+    return NULL;
 }
 
 // PushStreamContext structure remains unchanged
@@ -160,6 +392,10 @@ void* push_stream_directly(void* args) {
                 continue;
             }
 
+            // Record the time for this frame for latency calculation
+            int frame_num = frame_count + 1;  // Frame numbers typically start at 1
+            frame_timestamps[frame_num] = get_current_time_us();
+
             int64_t pts_time = av_rescale_q(pts, time_base, AV_TIME_BASE_Q);
             av_packet_rescale_ts(packet, time_base, out_stream->time_base);
             // Calculate the expected send time
@@ -215,14 +451,16 @@ void* push_stream_directly(void* args) {
 }
 
 int main(int argc, char* argv[]) {
-    if (argc < 4) {
-        fprintf(stderr, "Usage: %s <push_input_file> <push_output_url> \n", argv[0]);
-        fprintf(stderr, "Example: %s snow-scene.mp4 \"tcp://192.168.2.3:9000\"\n", argv[0]);
+    if (argc < 5) {
+        fprintf(stderr, "Usage: %s <push_input_file> <push_output_url> <yolo_server_ip> <yolo_server_port>\n", argv[0]);
+        fprintf(stderr, "Example: %s snow-scene.mp4 \"tcp://192.168.2.3:9000\" 127.0.0.1 9001\n", argv[0]);
         return 1;
     }
 
     char *push_input_file = argv[1];
     char *push_output_url = argv[2];
+    char *yolo_server_ip = argv[3];
+    char *yolo_server_port = argv[4];
 
     // Initialize FFmpeg network
     avformat_network_init();
@@ -241,9 +479,31 @@ int main(int argc, char* argv[]) {
         exit(1);
     }
 
+    // Create detection thread
+    pthread_t detection_thread_id;
+    char **detection_args = (char **)malloc(2 * sizeof(char *));
+    if (!detection_args) {
+        fprintf(stderr, "Could not allocate memory for detection_args.\n");
+        exit(1);
+    }
+    detection_args[0] = strdup(yolo_server_ip);
+    detection_args[1] = strdup(yolo_server_port);
+    if (!detection_args[0] || !detection_args[1]) {
+        fprintf(stderr, "Could not duplicate detection arguments.\n");
+        exit(1);
+    }
+
+    // Start detection thread
+    int ret_detect = pthread_create(&detection_thread_id, NULL, receive_yolo_results, detection_args);
+    if (ret_detect != 0) {
+        fprintf(stderr, "Failed to create detection thread.\n");
+        exit(1);
+    }
+
     // Optionally, wait for a few seconds before starting push
     sleep(5);
 
+    // Start push thread
     int ret_create = pthread_create(&push_thread_id, NULL, push_stream_directly, push_args);
     if (ret_create != 0) {
         fprintf(stderr, "Failed to create push thread.\n");
@@ -252,11 +512,19 @@ int main(int argc, char* argv[]) {
 
     // Wait for push thread to finish
     pthread_join(push_thread_id, NULL);
+    
+    // Signal detection thread to stop (can be implemented with a flag)
+    pthread_join(detection_thread_id, NULL);
 
     // Free push_args
     free(push_args[0]);
     free(push_args[1]);
     free(push_args);
+    
+    // Free detection_args
+    free(detection_args[0]);
+    free(detection_args[1]);
+    free(detection_args);
 
     avformat_network_deinit();
 
