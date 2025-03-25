@@ -52,6 +52,12 @@ pthread_mutex_t cout_mutex = PTHREAD_MUTEX_INITIALIZER;
 // Map to store frame sending timestamps for latency calculation
 std::map<int, int64_t> frame_timestamps;
 
+// Shared variables for thread synchronization
+std::atomic<bool> all_frames_sent(false);
+std::atomic<int> total_frames_sent(0);
+std::atomic<int> frames_processed(0);
+int max_wait_time_seconds = 10;  // Maximum time to wait after all frames are sent
+
 // Class for handling latency measurements and file output
 class LatencyLogger {
 public:
@@ -88,6 +94,9 @@ public:
                    frame_number, latency_ms);
             pthread_mutex_unlock(&cout_mutex);
         }
+        
+        // Increment the counter of processed frames
+        frames_processed++;
     }
 
     void write_to_file() {
@@ -189,8 +198,8 @@ void* receive_yolo_results(void* args) {
     
     // Setup latency logging
     std::string timestamp = get_timestamp_with_ms();
-    std::string log_dir = "result/" + timestamp;
-    std::string log_filename = log_dir + "/latency.log";
+    std::string log_dir = "result/latency" + timestamp;
+    std::string log_filename = log_dir + ".log";
     LatencyLogger logger(log_filename);
     
     // Create socket
@@ -234,45 +243,82 @@ void* receive_yolo_results(void* args) {
     printf("[Detection Thread] Connected to YOLO detection server\n");
     pthread_mutex_unlock(&cout_mutex);
     
+    // Set socket to non-blocking mode
+    int flags = fcntl(client_fd, F_GETFL, 0);
+    fcntl(client_fd, F_SETFL, flags | O_NONBLOCK);
+    
     // Buffer for receiving data
     char buffer[4096];
     std::string json_data;
     
+    // Variables to track idle time once all frames are sent
+    time_t last_activity_time = time(NULL);
+    bool should_exit = false;
+    
     // Receive data from server
-    while (true) {
+    while (!should_exit) {
+        // Check if we should exit based on frame count
+        if (all_frames_sent) {
+            // If we've received responses for all frames, or waited too long, exit
+            if (frames_processed >= total_frames_sent || 
+                difftime(time(NULL), last_activity_time) > max_wait_time_seconds) {
+                pthread_mutex_lock(&cout_mutex);
+                printf("[Detection Thread] All frames processed (%d/%d) or max wait time reached. Exiting.\n", 
+                      frames_processed.load(), total_frames_sent.load());
+                pthread_mutex_unlock(&cout_mutex);
+                should_exit = true;
+                break;
+            }
+        }
+        
+        // Try to receive data
         memset(buffer, 0, sizeof(buffer));
         int bytes_read = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
         
-        if (bytes_read <= 0) {
-            // Connection closed or error
-            pthread_mutex_lock(&cout_mutex);
-            fprintf(stderr, "[Detection Thread] Connection closed or error\n");
-            pthread_mutex_unlock(&cout_mutex);
-            break;
-        }
-        
-        // Add received data to json_data buffer
-        json_data.append(buffer, bytes_read);
-        
-        // Process complete JSON objects (delimited by newlines)
-        size_t newline_pos;
-        while ((newline_pos = json_data.find('\n')) != std::string::npos) {
-            // Extract one JSON object
-            std::string json_obj = json_data.substr(0, newline_pos);
-            json_data.erase(0, newline_pos + 1);
+        if (bytes_read > 0) {
+            // Update last activity time
+            last_activity_time = time(NULL);
             
-            // Extract only the frame number from the JSON
-            int frame_num = extract_frame_number(json_obj);
-            if (frame_num >= 0 && frame_timestamps.find(frame_num) != frame_timestamps.end()) {
-                // Calculate latency
-                int64_t receive_time_ms = get_current_time_us() / 1000;
-                int64_t send_time_ms = frame_timestamps[frame_num] / 1000;
+            // Add received data to json_data buffer
+            json_data.append(buffer, bytes_read);
+            
+            // Process complete JSON objects (delimited by newlines)
+            size_t newline_pos;
+            while ((newline_pos = json_data.find('\n')) != std::string::npos) {
+                // Extract one JSON object
+                std::string json_obj = json_data.substr(0, newline_pos);
+                json_data.erase(0, newline_pos + 1);
                 
-                // Log latency
-                logger.add_entry(frame_num, send_time_ms, receive_time_ms);
-                
-                // Remove from map to avoid memory growth
-                frame_timestamps.erase(frame_num);
+                // Extract only the frame number from the JSON
+                int frame_num = extract_frame_number(json_obj);
+                if (frame_num >= 0 && frame_timestamps.find(frame_num) != frame_timestamps.end()) {
+                    // Calculate latency
+                    int64_t receive_time_ms = get_current_time_us() / 1000;
+                    int64_t send_time_ms = frame_timestamps[frame_num] / 1000;
+                    
+                    // Log latency
+                    logger.add_entry(frame_num, send_time_ms, receive_time_ms);
+                    
+                    // Remove from map to avoid memory growth
+                    frame_timestamps.erase(frame_num);
+                }
+            }
+        } else if (bytes_read == 0) {
+            // Connection closed by server
+            pthread_mutex_lock(&cout_mutex);
+            printf("[Detection Thread] Connection closed by YOLO server\n");
+            pthread_mutex_unlock(&cout_mutex);
+            should_exit = true;
+        } else if (bytes_read < 0) {
+            // Error or would block
+            if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                pthread_mutex_lock(&cout_mutex);
+                fprintf(stderr, "[Detection Thread] Error reading from socket: %s\n", strerror(errno));
+                pthread_mutex_unlock(&cout_mutex);
+                should_exit = true;
+            } else {
+                // No data available, sleep a bit to avoid spinning
+                usleep(10000); // 10ms
             }
         }
     }
@@ -423,6 +469,7 @@ void* push_stream_directly(void* args) {
                 break;
             }
             frame_count++;
+            total_frames_sent = frame_count;  // Update atomic counter
         }
         av_packet_unref(packet);
     }
@@ -444,8 +491,11 @@ void* push_stream_directly(void* args) {
     avformat_free_context(output_fmt_ctx);
     avformat_close_input(&input_fmt_ctx);
 
+    // Signal that all frames have been sent
+    all_frames_sent = true;
+    
     pthread_mutex_lock(&cout_mutex);
-    printf("[Push Thread] Finished push_stream.\n");
+    printf("[Push Thread] Finished push_stream. Sent %d frames.\n", total_frames_sent.load());
     pthread_mutex_unlock(&cout_mutex);
 
     return NULL;
@@ -453,8 +503,8 @@ void* push_stream_directly(void* args) {
 
 int main(int argc, char* argv[]) {
     if (argc < 5) {
-        fprintf(stderr, "Usage: %s <push_input_file> <push_output_url> <yolo_server_ip> <yolo_server_port>\n", argv[0]);
-        fprintf(stderr, "Example: %s snow-scene.mp4 \"tcp://192.168.2.3:9000\" 127.0.0.1 9001\n", argv[0]);
+        fprintf(stderr, "Usage: %s <push_input_file> <push_output_url> <yolo_server_ip> <yolo_server_port> [<max_wait_time>]\n", argv[0]);
+        fprintf(stderr, "Example: %s snow-scene.mp4 \"tcp://192.168.2.3:9000\" 127.0.0.1 9001 20\n", argv[0]);
         return 1;
     }
 
@@ -462,6 +512,11 @@ int main(int argc, char* argv[]) {
     char *push_output_url = argv[2];
     char *yolo_server_ip = argv[3];
     char *yolo_server_port = argv[4];
+    
+    // Optional parameter for max wait time
+    if (argc >= 6) {
+        max_wait_time_seconds = atoi(argv[5]);
+    }
 
     // Initialize FFmpeg network
     avformat_network_init();
@@ -514,7 +569,8 @@ int main(int argc, char* argv[]) {
     // Wait for push thread to finish
     pthread_join(push_thread_id, NULL);
     
-    // Signal detection thread to stop (can be implemented with a flag)
+    // Now the detection thread should notice that all frames have been sent
+    // and will exit after receiving all responses or timing out
     pthread_join(detection_thread_id, NULL);
 
     // Free push_args
