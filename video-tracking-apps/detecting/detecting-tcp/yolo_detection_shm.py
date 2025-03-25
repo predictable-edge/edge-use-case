@@ -180,7 +180,7 @@ def process_frames_with_yolo(
             
             # Send frame number via TCP (simplified)
             if client_socket:
-                send_detection_results(client_socket, frame_num, None)
+                send_detection_results(client_socket, frame_num + 1, None)
             
             inference_time = (time.time() - start_time) * 1000  # Convert to ms
             timestamp_ms = int(time.monotonic() * 1000)
