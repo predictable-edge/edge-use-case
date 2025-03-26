@@ -331,6 +331,8 @@ void packet_reading_thread(AVFormatContext* input_fmt_ctx, int video_stream_idx,
             std::cerr << "Error reading frame: " << get_error_text(ret) << std::endl;
             break;
         }
+        auto read_start = std::chrono::steady_clock::now();
+        std::cout << "Read start: " << std::chrono::duration_cast<std::chrono::milliseconds>(read_start.time_since_epoch()).count() << std::endl;
 
         if (packet->stream_index == video_stream_idx) {
             packet_queue.push(packet);

@@ -69,7 +69,8 @@ def send_detection_results(client_socket, frame_num, _):
     # Send simple frame number message
     message = f"FRAME:{frame_num}\n"
     try:
-        client_socket.sendall(message.encode('utf-8'))
+        message = frame_num.to_bytes(4, byteorder='little')
+        client_socket.sendall(message)
     except Exception as e:
         print(f"Error sending detection results: {e}")
 
@@ -100,6 +101,7 @@ def process_frames_with_yolo(
     client_socket = None
     try:
         server_socket, client_socket = setup_tcp_server(tcp_port)
+        client_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     except Exception as e:
         print(f"Failed to setup TCP server: {e}")
         print("Continuing without TCP communication...")
