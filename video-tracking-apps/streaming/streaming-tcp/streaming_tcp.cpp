@@ -158,6 +158,11 @@ int64_t get_current_time_us() {
     return ((int64_t)tv.tv_sec * 1000000) + tv.tv_usec;
 }
 
+int64_t get_current_time_ms() {
+    auto now = std::chrono::steady_clock::now();
+    return std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+}
+
 std::string get_timestamp_with_ms() {
     auto now = std::chrono::system_clock::now();
     auto ms_part = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
@@ -201,7 +206,7 @@ void* receive_yolo_results(void* args) {
     std::string log_filename = log_dir + ".log";
     LatencyLogger logger(log_filename);
     
-    // Create socket
+    // Create TCP socket
     int client_fd;
     struct sockaddr_in server_addr;
     
@@ -213,6 +218,7 @@ void* receive_yolo_results(void* args) {
     }
     
     // Set up server address
+    memset(&server_addr, 0, sizeof(server_addr));
     server_addr.sin_family = AF_INET;
     server_addr.sin_port = htons(server_port);
     
@@ -225,34 +231,83 @@ void* receive_yolo_results(void* args) {
         return NULL;
     }
     
-    // Connect to the YOLO server
+    // Connect to server
     pthread_mutex_lock(&cout_mutex);
-    printf("[Detection Thread] Attempting to connect to %s:%d...\n", server_ip, server_port);
+    printf("[Detection Thread] Connecting to YOLO result server at %s:%d\n", server_ip, server_port);
     pthread_mutex_unlock(&cout_mutex);
     
-    if (connect(client_fd, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
-        pthread_mutex_lock(&cout_mutex);
-        fprintf(stderr, "[Detection Thread] Connection failed\n");
-        pthread_mutex_unlock(&cout_mutex);
-        close(client_fd);
-        return NULL;
-    }
-    
-    pthread_mutex_lock(&cout_mutex);
-    printf("[Detection Thread] Connected to YOLO detection server\n");
-    pthread_mutex_unlock(&cout_mutex);
-    
-    // Set socket to non-blocking mode
+    // Set socket to non-blocking for connection with timeout
     int flags = fcntl(client_fd, F_GETFL, 0);
     fcntl(client_fd, F_SETFL, flags | O_NONBLOCK);
     
-    // Buffer for receiving data
-    char buffer[4096];
-    std::string msg_data;
+    // Attempt connection
+    int res = connect(client_fd, (struct sockaddr*)&server_addr, sizeof(server_addr));
+    if (res < 0) {
+        if (errno == EINPROGRESS) {
+            // Connection in progress
+            fd_set fdset;
+            struct timeval tv;
+            
+            FD_ZERO(&fdset);
+            FD_SET(client_fd, &fdset);
+            tv.tv_sec = 5;  // 5 second timeout
+            tv.tv_usec = 0;
+            
+            res = select(client_fd + 1, NULL, &fdset, NULL, &tv);
+            if (res < 0) {
+                pthread_mutex_lock(&cout_mutex);
+                fprintf(stderr, "[Detection Thread] Error in select: %s\n", strerror(errno));
+                pthread_mutex_unlock(&cout_mutex);
+                close(client_fd);
+                return NULL;
+            } else if (res == 0) {
+                pthread_mutex_lock(&cout_mutex);
+                fprintf(stderr, "[Detection Thread] Connection timeout\n");
+                pthread_mutex_unlock(&cout_mutex);
+                close(client_fd);
+                return NULL;
+            }
+            
+            // Check if connection was successful
+            int so_error;
+            socklen_t len = sizeof(so_error);
+            if (getsockopt(client_fd, SOL_SOCKET, SO_ERROR, &so_error, &len) < 0) {
+                pthread_mutex_lock(&cout_mutex);
+                fprintf(stderr, "[Detection Thread] Error in getsockopt: %s\n", strerror(errno));
+                pthread_mutex_unlock(&cout_mutex);
+                close(client_fd);
+                return NULL;
+            }
+            
+            if (so_error) {
+                pthread_mutex_lock(&cout_mutex);
+                fprintf(stderr, "[Detection Thread] Connection error: %s\n", strerror(so_error));
+                pthread_mutex_unlock(&cout_mutex);
+                close(client_fd);
+                return NULL;
+            }
+        } else {
+            pthread_mutex_lock(&cout_mutex);
+            fprintf(stderr, "[Detection Thread] Connection failed: %s\n", strerror(errno));
+            pthread_mutex_unlock(&cout_mutex);
+            close(client_fd);
+            return NULL;
+        }
+    }
+    
+    // Set socket back to blocking mode
+    fcntl(client_fd, F_SETFL, flags);
+    
+    pthread_mutex_lock(&cout_mutex);
+    printf("[Detection Thread] Connected to YOLO result server\n");
+    pthread_mutex_unlock(&cout_mutex);
     
     // Variables to track idle time once all frames are sent
     time_t last_activity_time = time(NULL);
     bool should_exit = false;
+    
+    // Buffer for receiving data
+    char buffer[1024];  // Simple buffer for one-line messages
     
     // Receive data from server
     while (!should_exit) {
@@ -270,45 +325,47 @@ void* receive_yolo_results(void* args) {
             }
         }
         
-        // Try to receive data
+        // Receive data
         memset(buffer, 0, sizeof(buffer));
-        int bytes_read = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
+        ssize_t bytes_read = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
         
         if (bytes_read > 0) {
             // Update last activity time
             last_activity_time = time(NULL);
             
-            // Add received data to message buffer
-            msg_data.append(buffer, bytes_read);
+            // Ensure null termination
+            buffer[bytes_read] = '\0';
             
-            // Process complete messages (delimited by newlines)
-            size_t newline_pos;
-            while ((newline_pos = msg_data.find('\n')) != std::string::npos) {
-                // Extract one message
-                std::string message = msg_data.substr(0, newline_pos);
-                msg_data.erase(0, newline_pos + 1);
+            // Extract frame number from message
+            std::string message(buffer);
+            int frame_num = extract_frame_number(message);
+            
+            if (frame_num >= 0 && frame_timestamps.find(frame_num) != frame_timestamps.end()) {
+                // Calculate latency
+                int64_t receive_time_ms = get_current_time_ms();
+                int64_t send_time_ms = frame_timestamps[frame_num];
+                // std::cout << "Received frame number: " << frame_num << " at " << receive_time_ms << std::endl;
+
                 
-                // Extract frame number from message
-                int frame_num = extract_frame_number(message);
-                if (frame_num >= 0 && frame_timestamps.find(frame_num) != frame_timestamps.end()) {
-                    // Calculate latency
-                    int64_t receive_time_ms = get_current_time_us() / 1000;
-                    int64_t send_time_ms = frame_timestamps[frame_num] / 1000;
-                    
-                    // Log latency
-                    logger.add_entry(frame_num, send_time_ms, receive_time_ms);
-                    
-                    // Remove from map to avoid memory growth
-                    frame_timestamps.erase(frame_num);
+                // Log latency
+                logger.add_entry(frame_num, send_time_ms, receive_time_ms);
+                
+                // Remove from map to avoid memory growth
+                frame_timestamps.erase(frame_num);
+                
+                if (frame_num % 100 == 0) {
+                    pthread_mutex_lock(&cout_mutex);
+                    printf("[Detection Thread] Received result for frame %d\n", frame_num);
+                    pthread_mutex_unlock(&cout_mutex);
                 }
             }
         } else if (bytes_read == 0) {
             // Connection closed by server
             pthread_mutex_lock(&cout_mutex);
-            printf("[Detection Thread] Connection closed by YOLO server\n");
+            printf("[Detection Thread] Server closed connection\n");
             pthread_mutex_unlock(&cout_mutex);
             should_exit = true;
-        } else if (bytes_read < 0) {
+        } else {
             // Error or would block
             if (errno != EAGAIN && errno != EWOULDBLOCK) {
                 pthread_mutex_lock(&cout_mutex);
@@ -439,8 +496,6 @@ void* push_stream_directly(void* args) {
             }
 
             // Record the time for this frame for latency calculation
-            int frame_num = frame_count + 1;  // Frame numbers typically start at 1
-            frame_timestamps[frame_num] = get_current_time_us();
 
             int64_t pts_time = av_rescale_q(pts, time_base, AV_TIME_BASE_Q);
             av_packet_rescale_ts(packet, time_base, out_stream->time_base);
@@ -458,6 +513,7 @@ void* push_stream_directly(void* args) {
                     }
                 }
             }
+            frame_timestamps[frame_count] = get_current_time_ms();
             ret = av_interleaved_write_frame(output_fmt_ctx, packet);
             if (ret < 0) {
                 pthread_mutex_lock(&cout_mutex);
@@ -502,15 +558,16 @@ void* push_stream_directly(void* args) {
 
 int main(int argc, char* argv[]) {
     if (argc < 5) {
-        fprintf(stderr, "Usage: %s <push_input_file> <push_output_url> <yolo_server_ip> <yolo_server_port> [<max_wait_time>]\n", argv[0]);
-        fprintf(stderr, "Example: %s snow-scene.mp4 \"tcp://192.168.2.3:9000\" 127.0.0.1 9001 20\n", argv[0]);
+        fprintf(stderr, "Usage: %s <push_input_file> <push_output_url> <detection_server_ip> <detection_server_port> [<max_wait_time>]\n", argv[0]);
+        fprintf(stderr, "Example: %s snow-scene.mp4 \"tcp://192.168.2.3:9000\" 127.0.0.1 9876 20\n", argv[0]);
+        fprintf(stderr, "Note: Communication with detection server uses TCP protocol\n");
         return 1;
     }
 
     char *push_input_file = argv[1];
     char *push_output_url = argv[2];
-    char *yolo_server_ip = argv[3];
-    char *yolo_server_port = argv[4];
+    char *detection_server_ip = argv[3];
+    char *detection_server_port = argv[4];
     
     // Optional parameter for max wait time
     if (argc >= 6) {
@@ -541,8 +598,8 @@ int main(int argc, char* argv[]) {
         fprintf(stderr, "Could not allocate memory for detection_args.\n");
         exit(1);
     }
-    detection_args[0] = strdup(yolo_server_ip);
-    detection_args[1] = strdup(yolo_server_port);
+    detection_args[0] = strdup(detection_server_ip);
+    detection_args[1] = strdup(detection_server_port);
     if (!detection_args[0] || !detection_args[1]) {
         fprintf(stderr, "Could not duplicate detection arguments.\n");
         exit(1);
