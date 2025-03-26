@@ -9,6 +9,8 @@ import mmap
 import posix_ipc
 import signal
 import sys
+import struct  # Add struct module for binary packing
+import json  # Add json for class mapping
 
 def ensure_dir(directory):
     """Create directory if it doesn't exist."""
@@ -96,11 +98,11 @@ def process_frames_with_yolo(
     SEM_PROCESSED_NAME = "/frame_processed"
     METADATA_SIZE = 256
     
-    # Shared memory parameters for results - simplified to just hold frame number
+    # Shared memory parameters for results - now we need more space for detections
     RESULT_SHM_NAME = "/yolo_result_buffer"
     RESULT_SEM_READY_NAME = "/result_ready"
     RESULT_SEM_PROCESSED_NAME = "/result_processed"
-    RESULT_SIZE = 64  # Much smaller since we only need to store frame number
+    RESULT_SIZE = 8192  # Increase size to accommodate detection results
     
     # Initialize shared memory and semaphore resources
     shm = None
@@ -111,6 +113,19 @@ def process_frames_with_yolo(
     result_shm = None
     result_sem_ready = None
     result_sem_processed = None
+    
+    # COCO class names that YOLOv8 is trained on (for reference)
+    COCO_CLASSES = [
+        'person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 'truck', 'boat', 'traffic light',
+        'fire hydrant', 'stop sign', 'parking meter', 'bench', 'bird', 'cat', 'dog', 'horse', 'sheep', 'cow',
+        'elephant', 'bear', 'zebra', 'giraffe', 'backpack', 'umbrella', 'handbag', 'tie', 'suitcase', 'frisbee',
+        'skis', 'snowboard', 'sports ball', 'kite', 'baseball bat', 'baseball glove', 'skateboard', 'surfboard',
+        'tennis racket', 'bottle', 'wine glass', 'cup', 'fork', 'knife', 'spoon', 'bowl', 'banana', 'apple',
+        'sandwich', 'orange', 'broccoli', 'carrot', 'hot dog', 'pizza', 'donut', 'cake', 'chair', 'couch',
+        'potted plant', 'bed', 'dining table', 'toilet', 'tv', 'laptop', 'mouse', 'remote', 'keyboard', 'cell phone',
+        'microwave', 'oven', 'toaster', 'sink', 'refrigerator', 'book', 'clock', 'vase', 'scissors', 'teddy bear',
+        'hair drier', 'toothbrush'
+    ]
     
     try:
         # Open existing shared memory for input
@@ -231,21 +246,44 @@ def process_frames_with_yolo(
                 # Acquire the semaphore for exclusive access to the result buffer
                 result_sem_processed.acquire()
                 
-                # Simplified: only write frame number to result shared memory
-                result_str = str(frame_num)
-                result_bytes = result_str.encode()
+                # Pack all detection results into a binary format
+                # First, pack the frame number and number of detections
+                result_bytes = struct.pack('ii', frame_num, num_detections)
                 
-                # Clear the buffer and write the frame number
-                # First create a memoryview for easier slicing
-                result_view = memoryview(result_shm_map)
-                # Zero out the buffer
-                for i in range(RESULT_SIZE):
-                    result_view[i] = 0
-                # Write the frame number
-                for i, b in enumerate(result_bytes):
-                    result_view[i] = b
+                # Then pack each detection
+                if num_detections > 0:
+                    # Get boxes, confidences, and class indices
+                    xyxy = boxes.xyxy.cpu().numpy()  # Boxes in xyxy format
+                    conf_values = boxes.conf.cpu().numpy()  # Confidence values
+                    cls_indices = boxes.cls.cpu().numpy().astype(np.int32)  # Class indices
+                    
+                    # For each detection, pack x1, y1, x2, y2, confidence, class_id
+                    for i in range(num_detections):
+                        box = xyxy[i]
+                        x1, y1, x2, y2 = box
+                        confidence = conf_values[i]
+                        class_id = cls_indices[i]
+                        
+                        # Pack as floats and int
+                        detection_bytes = struct.pack('fffffi', 
+                                                    float(x1), float(y1), 
+                                                    float(x2), float(y2), 
+                                                    float(confidence), 
+                                                    int(class_id))
+                        result_bytes += detection_bytes
                 
-                # print(f"Writing frame {frame_num} to result shared memory")
+                # Write the bytes directly to shared memory
+                # Make sure we don't exceed the allocated memory size
+                if len(result_bytes) > RESULT_SIZE:
+                    print(f"Warning: Detection data size ({len(result_bytes)} bytes) exceeds buffer size ({RESULT_SIZE} bytes)")
+                    # Truncate data if necessary
+                    result_bytes = result_bytes[:RESULT_SIZE]
+                
+                # Clear buffer first
+                result_shm_map[:] = b'\x00' * RESULT_SIZE
+                
+                # Write data
+                result_shm_map[:len(result_bytes)] = result_bytes
                 
                 # Signal that result is ready
                 result_sem_ready.release()

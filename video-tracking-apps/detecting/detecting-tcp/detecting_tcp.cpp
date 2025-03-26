@@ -43,7 +43,16 @@ struct YoloDetectionResult {
     int frame_num;
     int64_t timestamp_ms;
     int num_detections;
-    std::string json_data;
+    
+    // New fields for storing detection data
+    struct Detection {
+        float x1, y1, x2, y2;  // Bounding box coordinates
+        float confidence;      // Confidence score
+        int class_id;          // Class ID
+    };
+    
+    std::vector<Detection> detections;  // Vector to store all detections
+    std::string json_data;     // Keep for backward compatibility
 };
 
 // Thread-safe queue for YOLO detection results
@@ -1119,7 +1128,7 @@ void yolo_result_reader_thread() {
     const std::string RESULT_SHM_NAME = "/yolo_result_buffer";
     const std::string RESULT_SEM_READY_NAME = "/result_ready";
     const std::string RESULT_SEM_PROCESSED_NAME = "/result_processed";
-    const size_t RESULT_SIZE = 64;  // Simplified buffer size for just frame number
+    const size_t RESULT_SIZE = 8192;  // Increased size to accommodate detection results
     
     // First, try to unlink any existing shared memory and semaphores (in case of improper shutdown)
     shm_unlink(RESULT_SHM_NAME.c_str());
@@ -1169,16 +1178,13 @@ void yolo_result_reader_thread() {
     
     std::cout << "Created YOLO result shared memory and semaphores" << std::endl;
     
-    // Buffer for reading data
-    char* data_ptr = static_cast<char*>(shm_ptr);
-    
     int frame_count = 0;
     
     // Set flag to indicate thread is running
     yolo_result_thread_running = true;
     
     while (yolo_result_thread_running) {
-        // Wait for new result to be available
+        // Wait for new result to be available using sem_timedwait
         struct timespec ts;
         clock_gettime(CLOCK_REALTIME, &ts);
         ts.tv_sec += 1; // 1 second timeout
@@ -1198,27 +1204,56 @@ void yolo_result_reader_thread() {
             }
         }
         
-        // Read frame number directly from shared memory
-        std::string buffer(data_ptr);
-        int frame_num = 0;
+        // Read frame number and number of detections from shared memory
+        char* data_ptr = static_cast<char*>(shm_ptr);
+        int* int_ptr = reinterpret_cast<int*>(data_ptr);
         
-        try {
-            frame_num = std::stoi(buffer);
+        int frame_num = int_ptr[0];  // First int is frame number
+        int num_detections = int_ptr[1];  // Second int is number of detections
+        
+        // Create result object
+        YoloDetectionResult result;
+        result.frame_num = frame_num;
+        result.timestamp_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        result.num_detections = num_detections;
+        
+        // Read detection data
+        if (num_detections > 0) {
+            // Position pointer after the header (2 ints)
+            const float* float_ptr = reinterpret_cast<const float*>(int_ptr + 2);
             
-            // Create simplified result object with just frame number
-            YoloDetectionResult result;
-            result.frame_num = frame_num;
-            result.timestamp_ms = 0;  // Not used in simplified version
-            result.num_detections = 0;  // Not used in simplified version
-            result.json_data = "";  // Not used in simplified version
+            // Reserve space for all detections
+            result.detections.reserve(num_detections);
             
-            // Add to queue for TCP transmission
-            yolo_result_queue.push(result);
-            
-            frame_count++;
-        } catch (const std::exception& e) {
-            std::cerr << "Error parsing frame number: '" << buffer << "' - " << e.what() << std::endl;
+            // For each detection, read 4 floats for bbox, 1 float for confidence, and 1 int for class_id
+            for (int i = 0; i < num_detections; i++) {
+                YoloDetectionResult::Detection det;
+                
+                // Read bounding box coordinates (4 floats)
+                det.x1 = float_ptr[0];
+                det.y1 = float_ptr[1];
+                det.x2 = float_ptr[2];
+                det.y2 = float_ptr[3];
+                
+                // Read confidence (1 float)
+                det.confidence = float_ptr[4];
+                
+                // Read class ID (1 int)
+                det.class_id = *reinterpret_cast<const int*>(float_ptr + 5);
+                
+                // Add to results
+                result.detections.push_back(det);
+                
+                // Move pointer to next detection (5 floats + 1 int = 6 float-sized elements)
+                float_ptr += 6;
+            }
         }
+        
+        // Add to queue for TCP transmission
+        yolo_result_queue.push(result);
+        
+        frame_count++;
         
         // Signal that we've processed the result
         sem_post(sem_processed);
@@ -1348,20 +1383,59 @@ void tcp_result_server_thread(int port) {
             }
             
             if (got_result) {
-                // Simplified: Just send frame number as a text message
-                std::string frame_msg = "FRAME:" + std::to_string(result.frame_num) + "\n";
+                // For compatibility with existing streaming client, we'll encode length-prefixed messages
                 
-                // Send the frame number
-                ssize_t sent = send(client_fd, frame_msg.c_str(), frame_msg.size(), 0);
-                if (sent != static_cast<ssize_t>(frame_msg.size())) {
-                    std::cerr << "Error sending frame number: " << strerror(errno) << std::endl;
+                // Calculate the size of the data to send
+                // - 4 bytes for frame number
+                // - 4 bytes for number of detections
+                // - For each detection: 6*4 bytes (4 floats for bbox, 1 float for confidence, 1 int for class ID)
+                size_t data_size = 8 + (result.num_detections * 24);
+                
+                // Allocate buffer
+                std::vector<char> buffer(data_size);
+                char* ptr = buffer.data();
+                
+                // Write frame number
+                *reinterpret_cast<int*>(ptr) = result.frame_num;
+                ptr += sizeof(int);
+                
+                // Write number of detections
+                *reinterpret_cast<int*>(ptr) = result.num_detections;
+                ptr += sizeof(int);
+                
+                // Write each detection
+                for (const auto& det : result.detections) {
+                    // Write bounding box
+                    *reinterpret_cast<float*>(ptr) = det.x1;
+                    ptr += sizeof(float);
+                    *reinterpret_cast<float*>(ptr) = det.y1;
+                    ptr += sizeof(float);
+                    *reinterpret_cast<float*>(ptr) = det.x2;
+                    ptr += sizeof(float);
+                    *reinterpret_cast<float*>(ptr) = det.y2;
+                    ptr += sizeof(float);
+                    
+                    // Write confidence
+                    *reinterpret_cast<float*>(ptr) = det.confidence;
+                    ptr += sizeof(float);
+                    
+                    // Write class ID
+                    *reinterpret_cast<int*>(ptr) = det.class_id;
+                    ptr += sizeof(int);
+                }
+                
+                // Send the binary data
+                ssize_t sent = send(client_fd, buffer.data(), data_size, 0);
+                if (sent != static_cast<ssize_t>(data_size)) {
+                    std::cerr << "Error sending detection data: " << strerror(errno) << std::endl;
                     close(client_fd);
                     client_connected = false;
                     continue;
                 }
                 
                 if (result.frame_num % 100 == 0) {
-                    std::cout << "Sent frame " << result.frame_num << " to client" << std::endl;
+                    std::cout << "Sent frame " << result.frame_num << " with " 
+                              << result.num_detections << " detections to client" << std::endl;
                 }
             }
         }
