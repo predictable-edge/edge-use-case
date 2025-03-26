@@ -1450,6 +1450,26 @@ void tcp_result_server_thread(int port) {
     std::cout << "TCP result server thread finished" << std::endl;
 }
 
+void cleanup() {
+    yolo_result_thread_running = false;
+    tcp_server_running = false;
+
+    sem_unlink("/frame_ready");
+    sem_unlink("/frame_processed");
+    sem_unlink("/result_ready");
+    sem_unlink("/result_processed");
+    sem_unlink("/sem_slots_empty");
+    sem_unlink("/sem_slots_filled");
+    sem_unlink("/sem_mutex");
+    
+    shm_unlink("/yolo_frame_buffer");
+    shm_unlink("/yolo_result_buffer");
+    shm_unlink("/yolo_frame_ringbuf");
+    
+    std::cout << "Cleanup completed" << std::endl;
+    _exit(0);
+}
+
 int main(int argc, char* argv[]) {
     // Expecting at least 1 argument: input_url (optionally tcp_result_port)
     if (argc < 2) {
@@ -1516,6 +1536,9 @@ int main(int argc, char* argv[]) {
     delete frame_queue;
 
     // Clean up FFmpeg
+    cleanup();
+    avcodec_free_context(&decoder_info.decoder_ctx);
+    avformat_close_input(&decoder_info.input_fmt_ctx);
     avformat_network_deinit();
     return 0;
 }
