@@ -11,6 +11,7 @@ import signal
 import sys
 import struct  # Add struct module for binary packing
 import json  # Add json for class mapping
+import threading  # Add threading for monitoring thread
 
 def ensure_dir(directory):
     """Create directory if it doesn't exist."""
@@ -72,6 +73,23 @@ def signal_handler(sig, frame):
     print("\nStopping frame processing...")
     sys.exit(0)
 
+# Frame monitoring thread function
+def monitor_frame_progress(frame_counter, running_flag):
+    """
+    Monitor if frames are still being processed and terminate if stalled
+    
+    Args:
+        frame_counter (list): Reference to frame counter (using list for mutability)
+        running_flag (list): Reference to running flag (using list for mutability)
+    """
+    last_frame_count = 0
+    while running_flag[0]:
+        time.sleep(1)  # Check every 1 second
+        if frame_counter[0] > 0 and frame_counter[0] == last_frame_count:
+            print("Frame processing has stalled. Terminating process.")
+            os._exit(1)  # Force terminate the process
+        last_frame_count = frame_counter[0]
+
 def process_frames_with_yolo(
     model_path,
     conf=0.3,
@@ -127,6 +145,19 @@ def process_frames_with_yolo(
         'hair drier', 'toothbrush'
     ]
     
+    # Frame count for monitoring progress - using list for mutability
+    frame_counter = [0]
+    running_flag = [True]
+    
+    # Start monitoring thread
+    monitor_thread = threading.Thread(
+        target=monitor_frame_progress, 
+        args=(frame_counter, running_flag),
+        daemon=True
+    )
+    monitor_thread.start()
+    print("Monitoring thread started")
+    
     try:
         # Open existing shared memory for input
         shm = posix_ipc.SharedMemory(SHM_NAME, posix_ipc.O_CREAT | posix_ipc.O_RDWR)
@@ -178,7 +209,6 @@ def process_frames_with_yolo(
                 f.write(f"{'Frame':<10}{'Inference_Time_ms':>20}{'Objects_Detected':>20}\n")
         
         # Process frames
-        frame_count = 0
         total_latency = 0
         
         print("Waiting for frames...")
@@ -213,7 +243,7 @@ def process_frames_with_yolo(
             # print(f"Frame {frame_num} finished: {timestamp_ms}, detections: {num_detections}")
             
             # Log results
-            if frame_count % 10 == 0:
+            if frame_counter[0] % 10 == 0:
                 print(f"Frame {frame_num}: {inference_time:.2f}ms, {num_detections} objects detected")
             
             # Save results if enabled
@@ -290,7 +320,7 @@ def process_frames_with_yolo(
             except Exception as e:
                 print(f"Error writing result: {e}")
             
-            frame_count += 1
+            frame_counter[0] += 1
             total_latency += inference_time
     
     except posix_ipc.ExistentialError as e:
@@ -298,6 +328,9 @@ def process_frames_with_yolo(
     except Exception as e:
         print(f"Error: {e}")
     finally:
+        # Signal monitoring thread to stop
+        running_flag[0] = False
+        
         # Clean up resources
         if show:
             cv2.destroyAllWindows()
@@ -307,9 +340,9 @@ def process_frames_with_yolo(
                                RESULT_SHM_NAME, RESULT_SEM_READY_NAME, RESULT_SEM_PROCESSED_NAME)
         
         # Print summary
-        if frame_count > 0:
-            avg_latency = total_latency / frame_count
-            print(f"\nProcessed {frame_count} frames")
+        if frame_counter[0] > 0:
+            avg_latency = total_latency / frame_counter[0]
+            print(f"\nProcessed {frame_counter[0]} frames")
             print(f"Average inference time: {avg_latency:.2f}ms")
             if save_results:
                 print(f"Results saved to {results_file}")
