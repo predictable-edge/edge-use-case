@@ -52,8 +52,36 @@ extern "C" {
 // Mutex for synchronized console output
 pthread_mutex_t cout_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+// Structure for storing detection information
+struct Detection {
+    float x1, y1, x2, y2;  // Bounding box coordinates
+    float confidence;      // Confidence score
+    int class_id;          // Class ID
+    
+    // Constructor for easy creation
+    Detection(float _x1, float _y1, float _x2, float _y2, float _conf, int _class_id)
+        : x1(_x1), y1(_y1), x2(_x2), y2(_y2), confidence(_conf), class_id(_class_id) {}
+};
+
+// COCO class names that YOLOv8 is trained on (for reference)
+const char* COCO_CLASSES[] = {
+    "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat", "traffic light",
+    "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep", "cow",
+    "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee",
+    "skis", "snowboard", "sports ball", "kite", "baseball bat", "baseball glove", "skateboard", "surfboard",
+    "tennis racket", "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple",
+    "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch",
+    "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse", "remote", "keyboard", "cell phone",
+    "microwave", "oven", "toaster", "sink", "refrigerator", "book", "clock", "vase", "scissors", "teddy bear",
+    "hair drier", "toothbrush"
+};
+
 // Map to store frame sending timestamps for latency calculation
 std::map<int, int64_t> frame_timestamps;
+
+// New map to store detection results for each frame
+std::map<int, std::vector<Detection>> frame_detections;
+std::mutex detections_mutex;
 
 // Shared variables for thread synchronization
 std::atomic<bool> all_frames_sent(false);
@@ -175,21 +203,6 @@ std::string get_timestamp_with_ms() {
     return oss.str();
 }
 
-// Function to extract frame number from a simple message format
-int extract_frame_number(const std::string& message) {
-    // Format is expected to be "FRAME:123" 
-    const std::string prefix = "FRAME:";
-    if (message.find(prefix) == 0) {
-        std::string frame_str = message.substr(prefix.length());
-        try {
-            return std::stoi(frame_str);
-        } catch (...) {
-            return -1;
-        }
-    }
-    return -1;
-}
-
 // Function to receive YOLO detection results via TCP
 void* receive_yolo_results(void* args) {
     char** my_args = (char**)args;
@@ -306,8 +319,8 @@ void* receive_yolo_results(void* args) {
     time_t last_activity_time = time(NULL);
     bool should_exit = false;
     
-    // Buffer for receiving data
-    char buffer[1024];  // Simple buffer for one-line messages
+    // Buffer for receiving detection data
+    std::vector<char> buffer(8192);  // Increased buffer size for detection data
     
     // Receive data from server
     while (!should_exit) {
@@ -325,27 +338,77 @@ void* receive_yolo_results(void* args) {
             }
         }
         
-        // Receive data
-        memset(buffer, 0, sizeof(buffer));
-        ssize_t bytes_read = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
+        // First receive the frame number and detection count (8 bytes total)
+        int header[2];  // To store frame_num and num_detections
+        ssize_t bytes_read = recv(client_fd, header, sizeof(header), 0);
         
-        if (bytes_read > 0) {
+        if (bytes_read == sizeof(header)) {
+            int frame_num = header[0];
+            int num_detections = header[1];
+            
             // Update last activity time
             last_activity_time = time(NULL);
             
-            // Ensure null termination
-            buffer[bytes_read] = '\0';
+            // Prepare to receive detection data if there are any
+            std::vector<Detection> detections;
             
-            // Extract frame number from message
-            std::string message(buffer);
-            int frame_num = extract_frame_number(message);
+            if (num_detections > 0) {
+                // Calculate expected size of detection data
+                size_t detection_data_size = num_detections * 24;  // 24 bytes per detection
+                
+                // Ensure buffer is large enough
+                if (buffer.size() < detection_data_size) {
+                    buffer.resize(detection_data_size);
+                }
+                
+                // Receive detection data
+                bytes_read = recv(client_fd, buffer.data(), detection_data_size, 0);
+                
+                if (bytes_read == static_cast<ssize_t>(detection_data_size)) {
+                    // Process all detections
+                    char* ptr = buffer.data();
+                    
+                    for (int i = 0; i < num_detections; i++) {
+                        // Read bounding box coordinates (4 floats)
+                        float x1 = *reinterpret_cast<float*>(ptr);
+                        ptr += sizeof(float);
+                        float y1 = *reinterpret_cast<float*>(ptr);
+                        ptr += sizeof(float);
+                        float x2 = *reinterpret_cast<float*>(ptr);
+                        ptr += sizeof(float);
+                        float y2 = *reinterpret_cast<float*>(ptr);
+                        ptr += sizeof(float);
+                        
+                        // Read confidence (1 float)
+                        float confidence = *reinterpret_cast<float*>(ptr);
+                        ptr += sizeof(float);
+                        
+                        // Read class ID (1 int)
+                        int class_id = *reinterpret_cast<int*>(ptr);
+                        ptr += sizeof(int);
+                        
+                        // Create Detection object and add to list
+                        detections.emplace_back(x1, y1, x2, y2, confidence, class_id);
+                    }
+                    
+                    // Store detections for this frame
+                    {
+                        std::lock_guard<std::mutex> lock(detections_mutex);
+                        frame_detections[frame_num] = detections;
+                    }
+                } else {
+                    pthread_mutex_lock(&cout_mutex);
+                    fprintf(stderr, "[Detection Thread] Error receiving detection data: expected %zu bytes, got %zd\n", 
+                            detection_data_size, bytes_read);
+                    pthread_mutex_unlock(&cout_mutex);
+                }
+            }
             
-            if (frame_num >= 0 && frame_timestamps.find(frame_num) != frame_timestamps.end()) {
+            // Process frame information for latency calculation
+            if (frame_timestamps.find(frame_num) != frame_timestamps.end()) {
                 // Calculate latency
                 int64_t receive_time_ms = get_current_time_ms();
                 int64_t send_time_ms = frame_timestamps[frame_num];
-                // std::cout << "Received frame number: " << frame_num << " at " << receive_time_ms << std::endl;
-
                 
                 // Log latency
                 logger.add_entry(frame_num, send_time_ms, receive_time_ms);
@@ -355,7 +418,22 @@ void* receive_yolo_results(void* args) {
                 
                 if (frame_num % 100 == 0) {
                     pthread_mutex_lock(&cout_mutex);
-                    printf("[Detection Thread] Received result for frame %d\n", frame_num);
+                    printf("[Detection Thread] Received frame %d with %d detections\n", 
+                           frame_num, num_detections);
+                    
+                    // Print some sample detections if available
+                    if (num_detections > 0 && !detections.empty()) {
+                        printf("[Detection Thread] Sample detections:\n");
+                        int print_count = std::min(3, num_detections);  // Print at most 3 detections
+                        for (int i = 0; i < print_count; i++) {
+                            const Detection& det = detections[i];
+                            const char* class_name = (det.class_id >= 0 && det.class_id < 80) ? 
+                                                     COCO_CLASSES[det.class_id] : "unknown";
+                            printf("  - %s (%.2f): [%.1f, %.1f, %.1f, %.1f]\n",
+                                   class_name, det.confidence, 
+                                   det.x1, det.y1, det.x2, det.y2);
+                        }
+                    }
                     pthread_mutex_unlock(&cout_mutex);
                 }
             }
@@ -377,6 +455,12 @@ void* receive_yolo_results(void* args) {
                 usleep(10000); // 10ms
             }
         }
+    }
+    
+    // Clean up detection data
+    {
+        std::lock_guard<std::mutex> lock(detections_mutex);
+        frame_detections.clear();
     }
     
     // Close the socket
