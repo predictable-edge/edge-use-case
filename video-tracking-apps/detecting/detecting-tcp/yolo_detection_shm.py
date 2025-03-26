@@ -9,8 +9,6 @@ import mmap
 import posix_ipc
 import signal
 import sys
-import socket
-import threading
 
 def ensure_dir(directory):
     """Create directory if it doesn't exist."""
@@ -42,45 +40,42 @@ def cleanup_resources(shm, sem_ready, sem_processed, shm_name, sem_ready_name, s
     except:
         pass
 
+def cleanup_result_resources(result_shm, result_sem_ready, result_sem_processed, result_shm_name, result_sem_ready_name, result_sem_processed_name):
+    """Clean up result shared memory and semaphores."""
+    if result_shm:
+        result_shm.close_fd()
+    if result_sem_ready:
+        result_sem_ready.close()
+    if result_sem_processed:
+        result_sem_processed.close()
+    
+    # Try to unlink shared resources
+    try:
+        posix_ipc.unlink_shared_memory(result_shm_name)
+    except:
+        pass
+    
+    try:
+        posix_ipc.unlink_semaphore(result_sem_ready_name)
+    except:
+        pass
+    
+    try:
+        posix_ipc.unlink_semaphore(result_sem_processed_name)
+    except:
+        pass
+
 def signal_handler(sig, frame):
     """Handle Ctrl+C gracefully."""
     print("\nStopping frame processing...")
     sys.exit(0)
-
-def setup_tcp_server(port=9001):
-    """Setup TCP server for sending detection results."""
-    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server_socket.bind(('0.0.0.0', port))
-    server_socket.listen(1)
-    print(f"TCP server listening on port {port}")
-    
-    # Accept client connection
-    client_socket, client_address = server_socket.accept()
-    print(f"Client connected from {client_address}")
-    
-    return server_socket, client_socket
-
-def send_detection_results(client_socket, frame_num, _):
-    """Send frame number over TCP in a simple format."""
-    if client_socket is None:
-        return
-    
-    # Send simple frame number message
-    message = f"FRAME:{frame_num}\n"
-    try:
-        message = frame_num.to_bytes(4, byteorder='little')
-        client_socket.sendall(message)
-    except Exception as e:
-        print(f"Error sending detection results: {e}")
 
 def process_frames_with_yolo(
     model_path,
     conf=0.3,
     show=False,
     device='cuda',
-    save_results=True,
-    tcp_port=9001
+    save_results=True
 ):
     """
     Process frames from shared memory with YOLO model
@@ -91,44 +86,62 @@ def process_frames_with_yolo(
         show (bool): Whether to display detection results
         device (str): Device to run YOLO on ('cpu' or 'cuda')
         save_results (bool): Whether to save detection results
-        tcp_port (int): Port to use for TCP communication
     """
     # Setup signal handler for graceful shutdown
     signal.signal(signal.SIGINT, signal_handler)
     
-    # Setup TCP server for sending detection results
-    server_socket = None
-    client_socket = None
-    try:
-        server_socket, client_socket = setup_tcp_server(tcp_port)
-        client_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-    except Exception as e:
-        print(f"Failed to setup TCP server: {e}")
-        print("Continuing without TCP communication...")
-    
-    # Shared memory parameters
+    # Shared memory parameters for input
     SHM_NAME = "/yolo_frame_buffer"
     SEM_READY_NAME = "/frame_ready"
     SEM_PROCESSED_NAME = "/frame_processed"
     METADATA_SIZE = 256
+    
+    # Shared memory parameters for results - simplified to just hold frame number
+    RESULT_SHM_NAME = "/yolo_result_buffer"
+    RESULT_SEM_READY_NAME = "/result_ready"
+    RESULT_SEM_PROCESSED_NAME = "/result_processed"
+    RESULT_SIZE = 64  # Much smaller since we only need to store frame number
     
     # Initialize shared memory and semaphore resources
     shm = None
     sem_ready = None
     sem_processed = None
     
+    # Initialize result shared memory and semaphore resources
+    result_shm = None
+    result_sem_ready = None
+    result_sem_processed = None
+    
     try:
-        # Open existing shared memory
+        # Open existing shared memory for input
         shm = posix_ipc.SharedMemory(SHM_NAME, posix_ipc.O_CREAT | posix_ipc.O_RDWR)
-        
-        # Open existing semaphores
         sem_ready = posix_ipc.Semaphore(SEM_READY_NAME)
         sem_processed = posix_ipc.Semaphore(SEM_PROCESSED_NAME)
-        
-        # Map the shared memory to this process
         shm_map = mmap.mmap(shm.fd, 0)
         
-        print(f"Connected to shared memory and semaphores")
+        print(f"Connected to input shared memory and semaphores")
+        
+        # Connect to the result shared memory (should be created by detecting_tcp)
+        max_retry = 30  # Maximum number of retries (5 seconds total with 0.2s sleep)
+        retry_count = 0
+        
+        while retry_count < max_retry:
+            try:
+                # Try to open existing shared memory for results
+                result_shm = posix_ipc.SharedMemory(RESULT_SHM_NAME)
+                result_sem_ready = posix_ipc.Semaphore(RESULT_SEM_READY_NAME)
+                result_sem_processed = posix_ipc.Semaphore(RESULT_SEM_PROCESSED_NAME)
+                result_shm_map = mmap.mmap(result_shm.fd, 0)
+                print(f"Connected to results shared memory and semaphores after {retry_count} retries")
+                break
+            except posix_ipc.ExistentialError:
+                # If the shared memory doesn't exist yet, wait a bit and retry
+                print(f"Results shared memory not available yet, retrying... ({retry_count+1}/{max_retry})")
+                time.sleep(0.2)
+                retry_count += 1
+                if retry_count >= max_retry:
+                    raise Exception("Timed out waiting for results shared memory")
+        
         print(f"Loading YOLO model {model_path}...")
         
         # Load YOLO model
@@ -180,13 +193,9 @@ def process_frames_with_yolo(
             boxes = results[0].boxes
             num_detections = len(boxes)
             
-            # Send frame number via TCP (simplified)
-            if client_socket:
-                send_detection_results(client_socket, frame_num + 1, None)
-            
             inference_time = (time.time() - start_time) * 1000  # Convert to ms
             timestamp_ms = int(time.monotonic() * 1000)
-            print(f"Frame {frame_num} finished: {timestamp_ms}")
+            # print(f"Frame {frame_num} finished: {timestamp_ms}, detections: {num_detections}")
             
             # Log results
             if frame_count % 10 == 0:
@@ -216,6 +225,32 @@ def process_frames_with_yolo(
                 # Break loop on 'q' key
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     break
+                    
+            # Wait for result buffer to be available for writing
+            try:
+                # Acquire the semaphore for exclusive access to the result buffer
+                result_sem_processed.acquire()
+                
+                # Simplified: only write frame number to result shared memory
+                result_str = str(frame_num)
+                result_bytes = result_str.encode()
+                
+                # Clear the buffer and write the frame number
+                # First create a memoryview for easier slicing
+                result_view = memoryview(result_shm_map)
+                # Zero out the buffer
+                for i in range(RESULT_SIZE):
+                    result_view[i] = 0
+                # Write the frame number
+                for i, b in enumerate(result_bytes):
+                    result_view[i] = b
+                
+                # print(f"Writing frame {frame_num} to result shared memory")
+                
+                # Signal that result is ready
+                result_sem_ready.release()
+            except Exception as e:
+                print(f"Error writing result: {e}")
             
             frame_count += 1
             total_latency += inference_time
@@ -228,13 +263,10 @@ def process_frames_with_yolo(
         # Clean up resources
         if show:
             cv2.destroyAllWindows()
-        
-        if client_socket:
-            client_socket.close()
-        if server_socket:
-            server_socket.close()
             
         cleanup_resources(shm, sem_ready, sem_processed, SHM_NAME, SEM_READY_NAME, SEM_PROCESSED_NAME)
+        cleanup_result_resources(result_shm, result_sem_ready, result_sem_processed, 
+                               RESULT_SHM_NAME, RESULT_SEM_READY_NAME, RESULT_SEM_PROCESSED_NAME)
         
         # Print summary
         if frame_count > 0:
@@ -261,8 +293,6 @@ def parse_args():
                       help='Device to run YOLO on')
     parser.add_argument('--no-save', action='store_false', dest='save',
                       help='Disable saving results')
-    parser.add_argument('--tcp-port', type=int, default=9001,
-                      help='TCP port for sending detection results')
     
     return parser.parse_args()
 
@@ -275,8 +305,7 @@ def main():
         conf=args.conf,
         show=args.show,
         device=args.device,
-        save_results=args.save,
-        tcp_port=args.tcp_port
+        save_results=args.save
     )
 
 if __name__ == "__main__":

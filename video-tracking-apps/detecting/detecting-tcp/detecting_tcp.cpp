@@ -22,6 +22,12 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <semaphore.h>
+// Added for TCP server
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <cstring>
+#include <algorithm>
 
 // FFmpeg includes
 extern "C" {
@@ -31,6 +37,57 @@ extern "C" {
 #include <libavutil/imgutils.h>
 #include <libswscale/swscale.h>
 }
+
+// Struct to hold YOLO detection result from shared memory
+struct YoloDetectionResult {
+    int frame_num;
+    int64_t timestamp_ms;
+    int num_detections;
+    std::string json_data;
+};
+
+// Thread-safe queue for YOLO detection results
+class YoloResultQueue {
+public:
+    void push(const YoloDetectionResult& result) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        queue_.push(result);
+        cond_var_.notify_one();
+    }
+
+    bool pop(YoloDetectionResult& result) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        while (queue_.empty() && !finished_) {
+            cond_var_.wait(lock);
+        }
+        if (queue_.empty()) return false;
+        result = queue_.front();
+        queue_.pop();
+        return true;
+    }
+
+    bool is_empty() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return queue_.empty();
+    }
+
+    void set_finished() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        finished_ = true;
+        cond_var_.notify_all();
+    }
+
+private:
+    std::queue<YoloDetectionResult> queue_;
+    std::mutex mutex_;
+    std::condition_variable cond_var_;
+    bool finished_ = false;
+};
+
+// Global result queue shared between threads
+YoloResultQueue yolo_result_queue;
+std::atomic<bool> yolo_result_thread_running(false);
+std::atomic<bool> tcp_server_running(false);
 
 // Helper function to convert FFmpeg error codes to std::string
 std::string get_error_text(int errnum) {
@@ -331,8 +388,8 @@ void packet_reading_thread(AVFormatContext* input_fmt_ctx, int video_stream_idx,
             std::cerr << "Error reading frame: " << get_error_text(ret) << std::endl;
             break;
         }
-        auto read_start = std::chrono::steady_clock::now();
-        std::cout << "Read start: " << std::chrono::duration_cast<std::chrono::milliseconds>(read_start.time_since_epoch()).count() << std::endl;
+        // auto read_start = std::chrono::steady_clock::now();
+        // std::cout << "Read start: " << std::chrono::duration_cast<std::chrono::milliseconds>(read_start.time_since_epoch()).count() << std::endl;
 
         if (packet->stream_index == video_stream_idx) {
             packet_queue.push(packet);
@@ -365,8 +422,8 @@ void decoding_thread(AVCodecContext* decoder_ctx, PacketQueue& packet_queue, Fra
     while (packet_queue.pop(packet)) {
         auto decode_start = std::chrono::steady_clock::now();
         int ret = avcodec_send_packet(decoder_ctx, packet);
-        std::cout << "Frame number: " << frame_number << " "
-                  << "Decode start: " << std::chrono::duration_cast<std::chrono::milliseconds>(decode_start.time_since_epoch()).count() << std::endl;
+        // std::cout << "Frame number: " << frame_number << " "
+        //           << "Decode start: " << std::chrono::duration_cast<std::chrono::milliseconds>(decode_start.time_since_epoch()).count() << std::endl;
         av_packet_free(&packet);
         if (ret < 0) {
             std::cerr << "Error sending packet to decoder: " << get_error_text(ret) << std::endl;
@@ -1054,28 +1111,311 @@ void process_frames_for_yolo_ringbuf(FrameQueue* frame_queue) {
     std::cout << "Frame processing finished" << std::endl;
 }
 
+// Function to read YOLO detection results from shared memory
+void yolo_result_reader_thread() {
+    std::cout << "Starting YOLO result reader thread..." << std::endl;
+    
+    // Define shared memory parameters for results
+    const std::string RESULT_SHM_NAME = "/yolo_result_buffer";
+    const std::string RESULT_SEM_READY_NAME = "/result_ready";
+    const std::string RESULT_SEM_PROCESSED_NAME = "/result_processed";
+    const size_t RESULT_SIZE = 64;  // Simplified buffer size for just frame number
+    
+    // First, try to unlink any existing shared memory and semaphores (in case of improper shutdown)
+    shm_unlink(RESULT_SHM_NAME.c_str());
+    sem_unlink(RESULT_SEM_READY_NAME.c_str());
+    sem_unlink(RESULT_SEM_PROCESSED_NAME.c_str());
+    
+    // Create shared memory
+    int shm_fd = shm_open(RESULT_SHM_NAME.c_str(), O_CREAT | O_RDWR, 0666);
+    if (shm_fd == -1) {
+        std::cerr << "Error creating result shared memory: " << strerror(errno) << std::endl;
+        return;
+    }
+    
+    // Set the size of the shared memory
+    if (ftruncate(shm_fd, RESULT_SIZE) == -1) {
+        std::cerr << "Error setting size for result shared memory: " << strerror(errno) << std::endl;
+        close(shm_fd);
+        shm_unlink(RESULT_SHM_NAME.c_str());
+        return;
+    }
+    
+    // Map shared memory
+    void* shm_ptr = mmap(NULL, RESULT_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
+    if (shm_ptr == MAP_FAILED) {
+        std::cerr << "Error mapping result shared memory: " << strerror(errno) << std::endl;
+        close(shm_fd);
+        shm_unlink(RESULT_SHM_NAME.c_str());
+        return;
+    }
+    
+    // Initialize memory with zeros
+    memset(shm_ptr, 0, RESULT_SIZE);
+    
+    // Create semaphores
+    sem_t* sem_ready = sem_open(RESULT_SEM_READY_NAME.c_str(), O_CREAT, 0666, 0);
+    sem_t* sem_processed = sem_open(RESULT_SEM_PROCESSED_NAME.c_str(), O_CREAT, 0666, 1);
+    
+    if (sem_ready == SEM_FAILED || sem_processed == SEM_FAILED) {
+        std::cerr << "Error creating result semaphores: " << strerror(errno) << std::endl;
+        munmap(shm_ptr, RESULT_SIZE);
+        close(shm_fd);
+        shm_unlink(RESULT_SHM_NAME.c_str());
+        sem_unlink(RESULT_SEM_READY_NAME.c_str());
+        sem_unlink(RESULT_SEM_PROCESSED_NAME.c_str());
+        return;
+    }
+    
+    std::cout << "Created YOLO result shared memory and semaphores" << std::endl;
+    
+    // Buffer for reading data
+    char* data_ptr = static_cast<char*>(shm_ptr);
+    
+    int frame_count = 0;
+    
+    // Set flag to indicate thread is running
+    yolo_result_thread_running = true;
+    
+    while (yolo_result_thread_running) {
+        // Wait for new result to be available
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_sec += 1; // 1 second timeout
+        
+        // Use sem_timedwait to allow for graceful shutdown
+        int ret = sem_timedwait(sem_ready, &ts);
+        if (ret == -1) {
+            if (errno == ETIMEDOUT) {
+                // Timeout occurred, check if we should exit
+                if (!yolo_result_thread_running) {
+                    break;
+                }
+                continue;
+            } else {
+                std::cerr << "Error waiting for result semaphore: " << strerror(errno) << std::endl;
+                break;
+            }
+        }
+        
+        // Read frame number directly from shared memory
+        std::string buffer(data_ptr);
+        int frame_num = 0;
+        
+        try {
+            frame_num = std::stoi(buffer);
+            
+            // Create simplified result object with just frame number
+            YoloDetectionResult result;
+            result.frame_num = frame_num;
+            result.timestamp_ms = 0;  // Not used in simplified version
+            result.num_detections = 0;  // Not used in simplified version
+            result.json_data = "";  // Not used in simplified version
+            
+            // Add to queue for TCP transmission
+            yolo_result_queue.push(result);
+            
+            frame_count++;
+        } catch (const std::exception& e) {
+            std::cerr << "Error parsing frame number: '" << buffer << "' - " << e.what() << std::endl;
+        }
+        
+        // Signal that we've processed the result
+        sem_post(sem_processed);
+    }
+    
+    // Clean up
+    sem_close(sem_ready);
+    sem_close(sem_processed);
+    munmap(shm_ptr, RESULT_SIZE);
+    close(shm_fd);
+    
+    // Note: We don't unlink the shared memory and semaphores here to allow for proper shutdown
+    // They will be unlinked on the next startup
+    
+    std::cout << "YOLO result reader thread finished" << std::endl;
+}
+
+// Function to start a TCP server to send YOLO results to streaming component
+void tcp_result_server_thread(int port) {
+    std::cout << "Starting TCP result server on port " << port << "..." << std::endl;
+    
+    // Create socket
+    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (server_fd < 0) {
+        std::cerr << "Error creating socket: " << strerror(errno) << std::endl;
+        return;
+    }
+    
+    // Set socket options to allow address reuse
+    int opt = 1;
+    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+        std::cerr << "Error setting socket options: " << strerror(errno) << std::endl;
+        close(server_fd);
+        return;
+    }
+    
+    // Prepare server address
+    struct sockaddr_in server_addr;
+    memset(&server_addr, 0, sizeof(server_addr));
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_addr.s_addr = INADDR_ANY;
+    server_addr.sin_port = htons(port);
+    
+    // Bind socket
+    if (bind(server_fd, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
+        std::cerr << "Error binding socket: " << strerror(errno) << std::endl;
+        close(server_fd);
+        return;
+    }
+    
+    // Listen for connections
+    if (listen(server_fd, 5) < 0) {
+        std::cerr << "Error listening on socket: " << strerror(errno) << std::endl;
+        close(server_fd);
+        return;
+    }
+    
+    std::cout << "TCP result server listening on port " << port << std::endl;
+    
+    // Set flag to indicate server is running
+    tcp_server_running = true;
+    
+    // Set socket to non-blocking mode
+    int flags = fcntl(server_fd, F_GETFL, 0);
+    fcntl(server_fd, F_SETFL, flags | O_NONBLOCK);
+    
+    int client_fd = -1;
+    bool client_connected = false;
+    
+    while (tcp_server_running) {
+        if (!client_connected) {
+            // Accept new connection (non-blocking)
+            struct sockaddr_in client_addr;
+            socklen_t client_addr_len = sizeof(client_addr);
+            client_fd = accept(server_fd, (struct sockaddr*)&client_addr, &client_addr_len);
+            
+            if (client_fd >= 0) {
+                // Connection accepted
+                client_connected = true;
+                char client_ip[INET_ADDRSTRLEN];
+                inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip));
+                std::cout << "Client connected from " << client_ip << ":" << ntohs(client_addr.sin_port) << std::endl;
+            } else {
+                // No connection or error
+                if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                    std::cerr << "Error accepting connection: " << strerror(errno) << std::endl;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(100)); // Sleep to avoid busy waiting
+                continue;
+            }
+        }
+        
+        // Process and send YOLO results from queue
+        if (client_connected) {
+            YoloDetectionResult result;
+            bool got_result = false;
+            
+            // Try to get a result with a timeout
+            {
+                std::mutex mtx;
+                std::unique_lock<std::mutex> lock(mtx);
+                std::condition_variable cv;
+                std::atomic<bool> data_ready(false);
+                
+                // Start a thread to check the queue
+                std::thread checker([&]() {
+                    got_result = yolo_result_queue.pop(result);
+                    data_ready = true;
+                    cv.notify_one();
+                });
+                checker.detach();
+                
+                // Wait with timeout
+                if (!cv.wait_for(lock, std::chrono::seconds(1), [&]() { return data_ready.load(); })) {
+                    // Timeout occurred, check if client is still connected
+                    int error = 0;
+                    socklen_t len = sizeof(error);
+                    int ret = getsockopt(client_fd, SOL_SOCKET, SO_ERROR, &error, &len);
+                    
+                    if (ret < 0 || error != 0) {
+                        std::cout << "Client disconnected" << std::endl;
+                        close(client_fd);
+                        client_connected = false;
+                    }
+                    continue;
+                }
+            }
+            
+            if (got_result) {
+                // Simplified: Just send frame number as a text message
+                std::string frame_msg = "FRAME:" + std::to_string(result.frame_num) + "\n";
+                
+                // Send the frame number
+                ssize_t sent = send(client_fd, frame_msg.c_str(), frame_msg.size(), 0);
+                if (sent != static_cast<ssize_t>(frame_msg.size())) {
+                    std::cerr << "Error sending frame number: " << strerror(errno) << std::endl;
+                    close(client_fd);
+                    client_connected = false;
+                    continue;
+                }
+                
+                if (result.frame_num % 100 == 0) {
+                    std::cout << "Sent frame " << result.frame_num << " to client" << std::endl;
+                }
+            }
+        }
+    }
+    
+    // Clean up
+    if (client_fd >= 0) {
+        close(client_fd);
+    }
+    close(server_fd);
+    
+    std::cout << "TCP result server thread finished" << std::endl;
+}
+
 int main(int argc, char* argv[]) {
-    // Expecting 1 arguments: program, input_url
+    // Expecting at least 1 argument: input_url (optionally tcp_result_port)
     if (argc < 2) {
         std::cerr << "Usage: " << argv[0] 
-                  << " tcp://192.168.2.3:9000?listen=1" 
+                  << " tcp://192.168.2.3:9000?listen=1 [tcp_result_port]" 
                   << std::endl;
         return 1;
     }
 
     const char* input_url = argv[1];
+    int tcp_result_port = 9876;  // Default port for results
+    
+    // Check if a custom port is provided
+    if (argc > 2) {
+        tcp_result_port = std::atoi(argv[2]);
+    }
+    
     // Initialize FFmpeg
     avformat_network_init();
 
     std::atomic<bool> decode_finished(false);
 
     FrameQueue* frame_queue = new FrameQueue();
+    
+    // Start YOLO result reader thread
+    std::thread yolo_result_thread(yolo_result_reader_thread);
+    
+    // Start TCP result server thread
+    std::thread tcp_server_thread(tcp_result_server_thread, tcp_result_port);
+    
+    // Start frame processing thread
     std::thread processing_thread(process_frames_for_yolo_shm, frame_queue);
 
     // Initialize decoder
     DecoderInfo decoder_info;
     if (!initialize_decoder(input_url, decoder_info)) {
         std::cerr << "Decoder initialization failed" << std::endl;
+        // Signal threads to exit
+        yolo_result_thread_running = false;
+        tcp_server_running = false;
         avformat_network_deinit();
         return 1;
     }
@@ -1087,9 +1427,16 @@ int main(int argc, char* argv[]) {
         }
     });
 
-    // Wait for threads to finish
+    // Wait for decoder and processing threads to finish
     decoder_thread.join();
     processing_thread.join();
+    
+    // Signal other threads to exit and wait for them
+    yolo_result_thread_running = false;
+    tcp_server_running = false;
+    
+    yolo_result_thread.join();
+    tcp_server_thread.join();
 
     // Clean up frame queues
     delete frame_queue;
