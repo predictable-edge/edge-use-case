@@ -5,6 +5,9 @@ emulation/figure
 emulation-srs/result
 emulation-srs/figure
 figure
+results
+result
+figures
 yolo-use-case/video-track/figures
 yolo-use-case/video-track/results
 emulation-srs/tutti-service/result
