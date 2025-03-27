@@ -46,6 +46,8 @@ def main():
     except subprocess.CalledProcessError:
         print("Error during compilation. Exiting...")
         return 1
+
+    time.sleep(3)
     
     # Run C++ program with command line arguments
     cpp_cmd = f"./detecting_tcp {args.input_url}"
