@@ -28,6 +28,7 @@
 #include <arpa/inet.h>
 #include <cstring>
 #include <algorithm>
+#include <netinet/tcp.h>  // Add this for TCP_NODELAY
 
 // FFmpeg includes
 extern "C" {
@@ -936,6 +937,14 @@ void tcp_result_server_thread(int port) {
                 char client_ip[INET_ADDRSTRLEN];
                 inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip));
                 std::cout << "Client connected from " << client_ip << ":" << ntohs(client_addr.sin_port) << std::endl;
+                
+                // Set TCP_NODELAY option to disable Nagle's algorithm
+                int flag = 1;
+                if (setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(int)) < 0) {
+                    std::cerr << "Warning: Failed to set TCP_NODELAY option: " << strerror(errno) << std::endl;
+                } else {
+                    std::cout << "TCP_NODELAY option set for client socket" << std::endl;
+                }
             } else {
                 // No connection or error
                 if (errno != EAGAIN && errno != EWOULDBLOCK) {
