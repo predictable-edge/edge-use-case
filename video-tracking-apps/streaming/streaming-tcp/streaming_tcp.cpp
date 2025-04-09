@@ -106,8 +106,11 @@ public:
         }
     }
 
-    void add_entry(int frame_number, int64_t send_time_ms, int64_t receive_time_ms) {
-        double latency_ms = receive_time_ms - send_time_ms;
+    void add_entry(int frame_number, int64_t send_time_us, int64_t receive_time_us) {
+        // Calculate latency in microseconds for precision
+        double latency_us = receive_time_us - send_time_us;
+        // Convert to milliseconds for display
+        double latency_ms = latency_us / 1000.0;
         
         // Update statistics
         frame_count_++;
@@ -215,8 +218,8 @@ void* receive_yolo_results(void* args) {
     
     // Setup latency logging
     std::string timestamp = get_timestamp_with_ms();
-    std::string log_dir = "result/latency" + timestamp;
-    std::string log_filename = log_dir + ".log";
+    std::string log_dir = "result/latency-" + timestamp;
+    std::string log_filename = log_dir + ".txt";
     LatencyLogger logger(log_filename);
     
     // Create TCP socket
@@ -407,11 +410,11 @@ void* receive_yolo_results(void* args) {
             // Process frame information for latency calculation
             if (frame_timestamps.find(frame_num) != frame_timestamps.end()) {
                 // Calculate latency
-                int64_t receive_time_ms = get_current_time_ms();
-                int64_t send_time_ms = frame_timestamps[frame_num];
+                int64_t receive_time_us = get_current_time_us();
+                int64_t send_time_us = frame_timestamps[frame_num];
                 
                 // Log latency
-                logger.add_entry(frame_num, send_time_ms, receive_time_ms);
+                logger.add_entry(frame_num + 1, send_time_us, receive_time_us);
                 
                 // Remove from map to avoid memory growth
                 frame_timestamps.erase(frame_num);
@@ -597,7 +600,7 @@ void* push_stream_directly(void* args) {
                     }
                 }
             }
-            frame_timestamps[frame_count] = get_current_time_ms();
+            frame_timestamps[frame_count] = get_current_time_us();
             ret = av_interleaved_write_frame(output_fmt_ctx, packet);
             if (ret < 0) {
                 pthread_mutex_lock(&cout_mutex);
