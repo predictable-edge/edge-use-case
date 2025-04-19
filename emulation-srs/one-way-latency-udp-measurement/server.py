@@ -3,11 +3,17 @@ import json
 import time
 import os
 import struct
+import argparse
 from datetime import datetime
 from collections import defaultdict
 
 class UDPLatencyServer:
     """UDP server that measures one-way latency of incoming packets"""
+    
+    # Constants for packet types
+    SETUP_PACKET = 0
+    DATA_PACKET = 1
+    FRAGMENT_PACKET = 2
     
     def __init__(self, ip="0.0.0.0", port=8000, buffer_size=65536):
         """Initialize the UDP server with given parameters"""
@@ -17,6 +23,13 @@ class UDPLatencyServer:
         self.sock = None
         self.results = {}
         self.fragment_tracker = defaultdict(dict)
+        self.expected_requests = None
+        self.request_size = None
+        self.interval_ms = None
+        self.received_unique_requests = set()
+        self.test_in_progress = False
+        self.is_running = False
+        self.test_start_time = None
         
         # Create results directory if it doesn't exist
         if not os.path.exists("results"):
@@ -28,26 +41,96 @@ class UDPLatencyServer:
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.bind((self.udp_ip, self.udp_port))
         
+        # Set a timeout to check for completion
+        self.sock.settimeout(0.5)
+        
         print(f"UDP server listening on {self.udp_ip}:{self.udp_port}")
+        print("Waiting for client setup packet...")
+        
+        self.is_running = True
         
         try:
-            while True:
-                # Receive data
-                data, addr = self.sock.recvfrom(self.buffer_size)
-                recv_time = time.time()
+            while self.is_running:
+                try:
+                    # Receive data
+                    data, addr = self.sock.recvfrom(self.buffer_size)
+                    recv_time = time.time()
+                    
+                    # Check if this is a setup packet
+                    if len(data) >= 4 and data[0:1] == struct.pack('!B', self.SETUP_PACKET):
+                        self.handle_setup_packet(data, addr)
+                    else:
+                        # Only process data packets if a test is in progress
+                        if self.test_in_progress:
+                            self.process_packet(data, addr, recv_time)
+                            
+                            # Check if we've received all expected requests
+                            if len(self.received_unique_requests) >= self.expected_requests:
+                                print(f"Received all {self.expected_requests} expected requests. Test complete.")
+                                self.save_final_results()
+                                self.test_in_progress = False
+                                print("Waiting for next test setup...")
+                        else:
+                            print(f"Received data packet from {addr} but no test is in progress. Ignoring.")
                 
-                self.process_packet(data, addr, recv_time)
+                except socket.timeout:
+                    # Just a timeout for checking stop conditions
+                    continue
         
         except KeyboardInterrupt:
             print("Server shutting down")
+            if self.test_in_progress and self.results:
+                self.save_final_results()
         finally:
             self.close()
+    
+    def handle_setup_packet(self, data, addr):
+        """Handle a setup packet from the client"""
+        try:
+            # Setup packet format:
+            # byte 0: packet type (0 for setup)
+            # bytes 1-4: request count (uint32)
+            # bytes 5-8: request size (uint32)
+            # bytes 9-12: interval ms (uint32)
+            if len(data) < 13:
+                print(f"Setup packet too small. Ignoring.")
+                return
+                
+            _, request_count, request_size, interval_ms = struct.unpack('!BIII', data[:13])
+            
+            # If a test is already in progress, finish it
+            if self.test_in_progress and self.results:
+                print("Previous test in progress. Saving results before starting new test.")
+                self.save_final_results()
+            
+            # Reset for new test
+            self.expected_requests = request_count
+            self.request_size = request_size
+            self.interval_ms = interval_ms
+            self.results = {}
+            self.fragment_tracker = defaultdict(dict)
+            self.received_unique_requests = set()
+            self.test_in_progress = True
+            self.test_start_time = time.time()
+            
+            print(f"Starting new test with parameters:")
+            print(f"  Request count: {request_count}")
+            print(f"  Request size: {request_size} bytes")
+            print(f"  Interval: {interval_ms} ms")
+            
+            # Send acknowledgment back to client
+            ack_packet = struct.pack('!B', self.SETUP_PACKET)
+            self.sock.sendto(ack_packet, addr)
+            print(f"Sent setup acknowledgment to {addr}")
+            
+        except Exception as e:
+            print(f"Error processing setup packet: {e}")
     
     def process_packet(self, data, addr, recv_time):
         """Process received UDP packet"""
         try:
             # Check if this is a fragmented request
-            if len(data) >= 17 and data[16:17] == b'\x01':  # The 17th byte is fragment info
+            if len(data) >= 2 and data[0:1] == struct.pack('!B', self.FRAGMENT_PACKET):
                 self.handle_fragmented_packet(data, addr, recv_time)
             else:
                 self.handle_single_packet(data, addr, recv_time)
@@ -57,16 +140,21 @@ class UDPLatencyServer:
     
     def handle_fragmented_packet(self, data, addr, recv_time):
         """Handle a fragmented packet"""
-        # Fragmented packet format (extended header)
-        # request_id (4 bytes), send_time (8 bytes), size (4 bytes), fragment_idx (1 byte), total_fragments (1 byte)
-        header_format = '!IQIIB'
+        # Fragmented packet format:
+        # byte 0: packet type (2 for fragment)
+        # bytes 1-4: request_id (uint32)
+        # bytes 5-12: send_time (uint64)
+        # bytes 13-16: total_size (uint32)
+        # byte 17: fragment_idx (uint8)
+        # byte 18: total_fragments (uint8)
+        header_format = '!BIQIBB'
         header_size = struct.calcsize(header_format)
         
         if len(data) < header_size:
             print(f"Fragment too small to contain header. Skipping.")
             return
         
-        request_id, send_time, request_size, fragment_idx, total_fragments = struct.unpack(
+        packet_type, request_id, send_time, request_size, fragment_idx, total_fragments = struct.unpack(
             header_format, data[:header_size]
         )
         
@@ -86,7 +174,8 @@ class UDPLatencyServer:
             if request_id in self.fragment_tracker:
                 self.fragment_tracker[request_id]['received_fragments'].append(fragment_idx)
                 
-                print(f"Received fragment {fragment_idx + 1}/{total_fragments} for request {request_id}")
+                if fragment_idx % 10 == 0:  # Only print every 10th fragment to reduce output
+                    print(f"Received fragment {fragment_idx + 1}/{total_fragments} for request {request_id}")
         
         # Check if we have all fragments
         if request_id in self.fragment_tracker and len(self.fragment_tracker[request_id]['received_fragments']) == self.fragment_tracker[request_id]['total_fragments']:
@@ -96,21 +185,29 @@ class UDPLatencyServer:
                 'size': self.fragment_tracker[request_id]['size']
             }
             
+            # Mark this request as received for tracking
+            self.received_unique_requests.add(request_id)
+            
             print(f"Completed request {request_id}, all {total_fragments} fragments received")
             
             # Clean up tracker
             del self.fragment_tracker[request_id]
-        
-        # Check for FINAL marker in the last fragment
-        if fragment_idx == total_fragments - 1 and len(data) > header_size and data[header_size:header_size+5] == b"FINAL":
-            num_requests = struct.unpack('!I', data[header_size+5:header_size+9])[0]
-            self.save_results(num_requests, request_size)
     
     def handle_single_packet(self, data, addr, recv_time):
         """Handle a single (non-fragmented) packet"""
-        # Standard single-packet format
-        # request_id (4 bytes), send_time (8 bytes), size (4 bytes)
-        request_id, send_time, request_size = struct.unpack('!IQI', data[:16])
+        # Standard single-packet format:
+        # byte 0: packet type (1 for data)
+        # bytes 1-4: request_id (uint32)
+        # bytes 5-12: send_time (uint64)
+        # bytes 13-16: size (uint32)
+        header_format = '!BIQI'
+        header_size = struct.calcsize(header_format)
+        
+        if len(data) < header_size:
+            print(f"Packet too small to contain header. Skipping.")
+            return
+            
+        packet_type, request_id, send_time, request_size = struct.unpack(header_format, data[:header_size])
         
         # Calculate one-way latency (ms)
         latency = (recv_time - send_time/1000) * 1000
@@ -121,17 +218,21 @@ class UDPLatencyServer:
             "size": request_size
         }
         
-        print(f"Received request {request_id} from {addr}, size: {request_size} bytes, latency: {latency:.2f} ms")
+        # Mark this request as received for tracking
+        self.received_unique_requests.add(request_id)
         
-        # If this is the last packet, save results
-        if len(data) > 16 and data[16:21] == b"FINAL":
-            num_requests = struct.unpack('!I', data[21:25])[0]
-            self.save_results(num_requests, request_size)
+        # Only print every 10th packet to reduce output
+        if request_id % 10 == 0 or request_id == 1 or request_id == self.expected_requests:
+            print(f"Received request {request_id}/{self.expected_requests} from {addr}, latency: {latency:.2f} ms")
     
-    def save_results(self, request_number, request_size):
-        """Save the latency results to a file"""
+    def save_final_results(self):
+        """Save final results when server is stopping"""
+        if not self.results:
+            print("No results to save")
+            return
+            
         timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-        filename = f"results/udp-{request_number}-{request_size}-{timestamp}.txt"
+        filename = f"results/udp-{self.expected_requests}-{self.request_size}-{timestamp}.txt"
         
         with open(filename, 'w') as f:
             f.write("Request_ID,Latency_ms\n")
@@ -139,9 +240,20 @@ class UDPLatencyServer:
                 f.write(f"{req_id},{self.results[req_id]['latency']:.2f}\n")
         
         print(f"Results saved to {filename}")
+        print(f"Test summary:")
+        print(f"  Received {len(self.received_unique_requests)}/{self.expected_requests} requests")
+        print(f"  Test duration: {time.time() - self.test_start_time:.2f} seconds")
         
-        # Reset for next test
-        self.results = {}
+        # Calculate statistics if we have results
+        if self.results:
+            latencies = [result['latency'] for result in self.results.values()]
+            avg_latency = sum(latencies) / len(latencies)
+            min_latency = min(latencies)
+            max_latency = max(latencies)
+            
+            print(f"  Average latency: {avg_latency:.2f} ms")
+            print(f"  Minimum latency: {min_latency:.2f} ms")
+            print(f"  Maximum latency: {max_latency:.2f} ms")
     
     def close(self):
         """Close the server socket"""
@@ -151,8 +263,18 @@ class UDPLatencyServer:
 
 
 def main():
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='UDP Latency Server')
+    parser.add_argument('--ip', default='0.0.0.0', help='IP address to bind to')
+    parser.add_argument('--port', type=int, default=8000, help='Port to listen on')
+    
+    args = parser.parse_args()
+    
     # Create and start the UDP server
-    server = UDPLatencyServer()
+    server = UDPLatencyServer(
+        ip=args.ip,
+        port=args.port
+    )
     server.start()
 
 
