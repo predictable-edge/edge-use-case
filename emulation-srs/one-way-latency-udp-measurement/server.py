@@ -234,26 +234,33 @@ class UDPLatencyServer:
         timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
         filename = f"results/udp-{self.expected_requests}-{self.request_size}-{timestamp}.txt"
         
+        # Calculate statistics if we have results
+        latencies = [result['latency'] for result in self.results.values()]
+        avg_latency = sum(latencies) / len(latencies)
+        min_latency = min(latencies)
+        max_latency = max(latencies)
+        std_dev = 0
+        if len(latencies) > 1:
+            variance = sum((x - avg_latency) ** 2 for x in latencies) / len(latencies)
+            std_dev = variance ** 0.5
+        
         with open(filename, 'w') as f:
-            f.write("Request_ID,Latency_ms\n")
+            # Format column headers with fixed width
+            f.write(f"{'Request_ID':<12} {'Latency_ms':<12}\n")
+            
+            # Write data with fixed width columns for better readability
             for req_id in sorted(self.results.keys()):
-                f.write(f"{req_id},{self.results[req_id]['latency']:.2f}\n")
+                latency = self.results[req_id]['latency']
+                f.write(f"{req_id:<12} {latency:<12.2f}\n")
         
         print(f"Results saved to {filename}")
         print(f"Test summary:")
         print(f"  Received {len(self.received_unique_requests)}/{self.expected_requests} requests")
         print(f"  Test duration: {time.time() - self.test_start_time:.2f} seconds")
-        
-        # Calculate statistics if we have results
-        if self.results:
-            latencies = [result['latency'] for result in self.results.values()]
-            avg_latency = sum(latencies) / len(latencies)
-            min_latency = min(latencies)
-            max_latency = max(latencies)
-            
-            print(f"  Average latency: {avg_latency:.2f} ms")
-            print(f"  Minimum latency: {min_latency:.2f} ms")
-            print(f"  Maximum latency: {max_latency:.2f} ms")
+        print(f"  Average latency: {avg_latency:.2f} ms")
+        print(f"  Minimum latency: {min_latency:.2f} ms")
+        print(f"  Maximum latency: {max_latency:.2f} ms")
+        print(f"  Standard deviation: {std_dev:.2f} ms")
     
     def close(self):
         """Close the server socket"""
