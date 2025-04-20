@@ -4,6 +4,7 @@ import time
 import os
 import struct
 import argparse
+import numpy as np
 from datetime import datetime
 from collections import defaultdict
 
@@ -236,13 +237,16 @@ class UDPLatencyServer:
         
         # Calculate statistics if we have results
         latencies = [result['latency'] for result in self.results.values()]
-        avg_latency = sum(latencies) / len(latencies)
-        min_latency = min(latencies)
-        max_latency = max(latencies)
-        std_dev = 0
-        if len(latencies) > 1:
-            variance = sum((x - avg_latency) ** 2 for x in latencies) / len(latencies)
-            std_dev = variance ** 0.5
+        latencies_array = np.array(latencies)
+        
+        avg_latency = np.mean(latencies_array)
+        min_latency = np.min(latencies_array)
+        max_latency = np.max(latencies_array)
+        std_dev = np.std(latencies_array)
+        
+        # Calculate percentiles
+        p50_latency = np.percentile(latencies_array, 50)
+        p99_latency = np.percentile(latencies_array, 99)
         
         with open(filename, 'w') as f:
             # Format column headers with fixed width
@@ -260,6 +264,8 @@ class UDPLatencyServer:
         print(f"  Average latency: {avg_latency:.2f} ms")
         print(f"  Minimum latency: {min_latency:.2f} ms")
         print(f"  Maximum latency: {max_latency:.2f} ms")
+        print(f"  p50 latency (median): {p50_latency:.2f} ms")
+        print(f"  p99 latency: {p99_latency:.2f} ms")
         print(f"  Standard deviation: {std_dev:.2f} ms")
     
     def close(self):
