@@ -34,6 +34,7 @@
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
+#include <libavutil/intreadwrite.h>
 #include <libavutil/avutil.h>
 #include <libavutil/imgutils.h>
 #include <libswscale/swscale.h>
@@ -295,6 +296,9 @@ bool initialize_decoder(const char* input_url, DecoderInfo& decoder_info) {
     // Initialize input format context
     decoder_info.input_fmt_ctx = nullptr;
     AVDictionary* format_opts = nullptr;
+    // av_dict_set(&format_opts, "fflags",          "nobuffer", 0);
+    av_dict_set(&format_opts, "probesize",       "8192",    0);
+    av_dict_set(&format_opts, "analyzeduration", "0",        0);  
     if (avformat_open_input(&decoder_info.input_fmt_ctx, input_url, nullptr, &format_opts) < 0) {
         std::cerr << "Could not open input tcp stream: " << input_url << std::endl;
         av_dict_free(&format_opts);
@@ -400,7 +404,8 @@ void packet_reading_thread(AVFormatContext* input_fmt_ctx, int video_stream_idx,
         }
         // auto read_start = std::chrono::steady_clock::now();
         // std::cout << "Read start: " << std::chrono::duration_cast<std::chrono::milliseconds>(read_start.time_since_epoch()).count() << std::endl;
-
+        // uint64_t timestamp;
+        // printf("timestamp: %lu\n", timestamp);
         if (packet->stream_index == video_stream_idx) {
             packet_queue.push(packet);
             packet = av_packet_alloc();
