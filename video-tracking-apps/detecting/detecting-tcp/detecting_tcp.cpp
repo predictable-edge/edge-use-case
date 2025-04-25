@@ -389,14 +389,13 @@ bool initialize_decoder(const char* input_url, DecoderInfo& decoder_info) {
 int64_t extract_timestamp(AVPacket *packet) {
     uint8_t *data = packet->data;
     int size = packet->size;
-    int offset = 0;
-
+    
     if (size < 8) return AVERROR(EINVAL);
     
     uint32_t first_nal_size = (data[0] << 24) | (data[1] << 16) |
                               (data[2] << 8) | data[3];
 
-    if (first_nal_size + 4 > size) return AVERROR(EINVAL);
+    if (first_nal_size + 4 > static_cast<uint32_t>(size)) return AVERROR(EINVAL);
 
     if (data[4] != 0x06) {
         return AVERROR(EINVAL);
@@ -405,9 +404,7 @@ int64_t extract_timestamp(AVPacket *packet) {
     int sei_offset = 5;
     
     if (data[sei_offset] != 0x05) return AVERROR(EINVAL);
-    sei_offset++;
-    
-    int payload_size = data[sei_offset++];
+    sei_offset += 2;
     
     const uint8_t expected_uuid[16] = {
         0x54, 0x69, 0x6D, 0x65, // "Time"
