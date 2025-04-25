@@ -297,7 +297,7 @@ bool initialize_decoder(const char* input_url, DecoderInfo& decoder_info) {
     decoder_info.input_fmt_ctx = nullptr;
     AVDictionary* format_opts = nullptr;
     // av_dict_set(&format_opts, "fflags",          "nobuffer", 0);
-    av_dict_set(&format_opts, "probesize",       "8192",    0);
+    av_dict_set(&format_opts, "probesize",       "327680",    0);
     av_dict_set(&format_opts, "analyzeduration", "0",        0);  
     if (avformat_open_input(&decoder_info.input_fmt_ctx, input_url, nullptr, &format_opts) < 0) {
         std::cerr << "Could not open input tcp stream: " << input_url << std::endl;
@@ -386,6 +386,59 @@ bool initialize_decoder(const char* input_url, DecoderInfo& decoder_info) {
     return true;
 }
 
+int64_t extract_timestamp(AVPacket *packet) {
+    uint8_t *data = packet->data;
+    int size = packet->size;
+    int offset = 0;
+
+    if (size < 8) return AVERROR(EINVAL);
+    
+    uint32_t first_nal_size = (data[0] << 24) | (data[1] << 16) |
+                              (data[2] << 8) | data[3];
+
+    if (first_nal_size + 4 > size) return AVERROR(EINVAL);
+
+    if (data[4] != 0x06) {
+        return AVERROR(EINVAL);
+    }
+    
+    int sei_offset = 5;
+    
+    if (data[sei_offset] != 0x05) return AVERROR(EINVAL);
+    sei_offset++;
+    
+    int payload_size = data[sei_offset++];
+    
+    const uint8_t expected_uuid[16] = {
+        0x54, 0x69, 0x6D, 0x65, // "Time"
+        0x53, 0x74, 0x61, 0x6D, // "Stam"
+        0x70, 0x00, 0x01, 0x02, 
+        0x03, 0x04, 0x05, 0x06 
+    };
+    
+    if (memcmp(data + sei_offset, expected_uuid, 16) != 0) {
+        return AVERROR(EINVAL);
+    }
+    sei_offset += 16;
+    
+    int64_t timestamp;
+    memcpy(&timestamp, data + sei_offset, sizeof(int64_t));
+    
+    int original_size = size - (4 + first_nal_size);
+    uint8_t *restored_data = (uint8_t*)av_malloc(original_size);
+    if (!restored_data) return AVERROR(ENOMEM);
+    
+    memcpy(restored_data, data + 4 + first_nal_size, original_size);
+    
+    av_buffer_unref(&packet->buf);
+    packet->buf = av_buffer_create(restored_data, original_size, 
+                                  av_buffer_default_free, NULL, 0);
+    packet->data = restored_data;
+    packet->size = original_size;
+    
+    return timestamp;
+}
+
 // Decoder Function
 void packet_reading_thread(AVFormatContext* input_fmt_ctx, int video_stream_idx, PacketQueue& packet_queue) {
     AVPacket* packet = av_packet_alloc();
@@ -402,10 +455,8 @@ void packet_reading_thread(AVFormatContext* input_fmt_ctx, int video_stream_idx,
             std::cerr << "Error reading frame: " << get_error_text(ret) << std::endl;
             break;
         }
-        // auto read_start = std::chrono::steady_clock::now();
-        // std::cout << "Read start: " << std::chrono::duration_cast<std::chrono::milliseconds>(read_start.time_since_epoch()).count() << std::endl;
-        // uint64_t timestamp;
-        // printf("timestamp: %lu\n", timestamp);
+        int64_t timestamp = extract_timestamp(packet);
+        printf("timestamp: %ld\n", timestamp);
         if (packet->stream_index == video_stream_idx) {
             packet_queue.push(packet);
             packet = av_packet_alloc();
