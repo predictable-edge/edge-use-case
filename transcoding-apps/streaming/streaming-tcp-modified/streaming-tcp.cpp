@@ -701,6 +701,7 @@ void* pull_stream(void* args) {
             continue;
         }
         reportResponse(response_info);
+        std::cout << "response id: " << response_info.response_id << " response size: " << packet->size << std::endl;
         if (packet->stream_index == video_stream_index) {
             int64_t pull_time_ms_before_dec = get_current_time_us() / 1000;
             // std::cout << packet->pts << ": " << get_timestamp_with_ms() << std::endl;
