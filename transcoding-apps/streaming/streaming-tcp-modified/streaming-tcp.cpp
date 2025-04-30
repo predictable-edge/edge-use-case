@@ -18,6 +18,7 @@
 #include <mutex>
 #include <vector>
 #include <filesystem>
+#include <edge_client/application_api.h>
 
 // Include FFmpeg headers
 extern "C" {
@@ -495,6 +496,55 @@ void* encode_thread_func(void* arg) {
     return NULL;
 }
 
+int extract_response_info(AVPacket *packet, ResponseInfo *response_info) {
+    uint8_t *data = packet->data;
+    int size = packet->size;
+    
+    if (size < sizeof(ResponseInfo)) return AVERROR(EINVAL);
+    
+    uint32_t first_nal_size = (data[0] << 24) | (data[1] << 16) |
+                              (data[2] << 8) | data[3];
+
+    if (first_nal_size + 4 > static_cast<uint32_t>(size)) return AVERROR(EINVAL);
+
+    if (data[4] != 0x06) {
+        return AVERROR(EINVAL);
+    }
+    
+    int sei_offset = 5;
+    
+    if (data[sei_offset] != 0x05) return AVERROR(EINVAL);
+    sei_offset += 2;
+    
+    const uint8_t expected_uuid[16] = {
+        0x54, 0x69, 0x6D, 0x65, // "Time"
+        0x53, 0x74, 0x61, 0x6D, // "Stam"
+        0x70, 0x00, 0x01, 0x02, 
+        0x03, 0x04, 0x05, 0x06 
+    };
+    
+    if (memcmp(data + sei_offset, expected_uuid, 16) != 0) {
+        return AVERROR(EINVAL);
+    }
+    sei_offset += 16;
+    
+    memcpy(response_info, data + sei_offset, sizeof(ResponseInfo));
+    
+    int original_size = size - (4 + first_nal_size);
+    uint8_t *restored_data = (uint8_t*)av_malloc(original_size);
+    if (!restored_data) return AVERROR(ENOMEM);
+    
+    memcpy(restored_data, data + 4 + first_nal_size, original_size);
+    
+    av_buffer_unref(&packet->buf);
+    packet->buf = av_buffer_create(restored_data, original_size, 
+                                  av_buffer_default_free, NULL, 0);
+    packet->data = restored_data;
+    packet->size = original_size;
+    
+    return 0;
+}
+
 // Modified pull_stream function to handle multiple pull URLs and logging
 void* pull_stream(void* args) {
     PullArgs* pull_args = static_cast<PullArgs*>(args);
@@ -519,7 +569,8 @@ void* pull_stream(void* args) {
     int ret = 0;
 
     AVDictionary* options = nullptr;
-
+    av_dict_set(&options, "probesize",       "327680",    0);
+    av_dict_set(&options, "analyzeduration", "0",        0); 
     ret = avformat_open_input(&input_fmt_ctx, input_url, nullptr, &options);
     if (ret < 0) {
         pthread_mutex_lock(&cout_mutex);
@@ -643,6 +694,13 @@ void* pull_stream(void* args) {
 
     int64_t frame_count = 0;
     while (av_read_frame(input_fmt_ctx, packet) >= 0) {
+        ResponseInfo response_info;
+        int ret = extract_response_info(packet, &response_info);
+        if (ret < 0) {
+            std::cerr << "[Pull Thread " << index << "] Failed to extract response info" << std::endl;
+            continue;
+        }
+        reportResponse(response_info);
         if (packet->stream_index == video_stream_index) {
             int64_t pull_time_ms_before_dec = get_current_time_us() / 1000;
             // std::cout << packet->pts << ": " << get_timestamp_with_ms() << std::endl;
