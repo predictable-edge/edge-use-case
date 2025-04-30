@@ -14,6 +14,9 @@
 #include <assert.h>
 #include <vector>
 #include <filesystem>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <edge_server/application_api.h>
 
 // FFmpeg includes
 extern "C" {
@@ -230,6 +233,8 @@ bool initialize_decoder(const char* input_url, DecoderInfo& decoder_info) {
     // Initialize input format context
     decoder_info.input_fmt_ctx = nullptr;
     AVDictionary* format_opts = nullptr;
+    av_dict_set(&format_opts, "probesize",       "327680",    0);
+    av_dict_set(&format_opts, "analyzeduration", "0",        0); 
     if (avformat_open_input(&decoder_info.input_fmt_ctx, input_url, nullptr, &format_opts) < 0) {
         std::cerr << "Could not open input tcp stream: " << input_url << std::endl;
         av_dict_free(&format_opts);
@@ -375,7 +380,7 @@ void packet_reading_thread(AVFormatContext* input_fmt_ctx, int video_stream_idx,
         packet_queue.set_finished();
         return;
     }
-
+    uint32_t request_count = 0;
     while (true) {
         int ret = av_read_frame(input_fmt_ctx, packet);
         if (ret < 0) {
@@ -384,7 +389,9 @@ void packet_reading_thread(AVFormatContext* input_fmt_ctx, int video_stream_idx,
             break;
         }
         uint64_t timestamp = extract_timestamp(packet);
-
+        uint32_t net_ip  = inet_addr("10.45.0.2");
+        uint32_t host_ip = ntohl(net_ip);
+        reportRequest(host_ip, request_count++, timestamp);
         if (packet->stream_index == video_stream_idx) {
             packet_queue.push(packet);
             packet = av_packet_alloc();
@@ -493,6 +500,48 @@ bool decode_frames(DecoderInfo decoder_info, std::vector<FrameQueue*>& encoder_q
     decode_finished = true;
     std::cout << "Decoding finished." << std::endl;
     return true;
+}
+
+int embed_response_header(AVPacket *packet, const ResponseInfo& response_info) {
+    uint8_t sei_content[48];
+    int sei_content_size = 0;
+    
+    sei_content[sei_content_size++] = 0x06;
+    sei_content[sei_content_size++] = 0x05;
+    int payload_size = 16 + sizeof(ResponseInfo);
+    sei_content[sei_content_size++] = payload_size;
+    
+    const uint8_t uuid[16] = {
+        0x54, 0x69, 0x6D, 0x65, // "Time"
+        0x53, 0x74, 0x61, 0x6D, // "Stam"
+        0x70, 0x00, 0x01, 0x02, 
+        0x03, 0x04, 0x05, 0x06 
+    };
+    memcpy(sei_content + sei_content_size, uuid, 16);
+    sei_content_size += 16;
+    
+    memcpy(sei_content + sei_content_size, &response_info, sizeof(ResponseInfo));
+    sei_content_size += sizeof(ResponseInfo);
+    sei_content[sei_content_size++] = 0x80;
+    
+    int new_size = packet->size + sei_content_size + 4;
+    uint8_t *new_data = (uint8_t*)av_malloc(new_size);
+    if (!new_data) return AVERROR(ENOMEM);
+    
+    new_data[0] = (sei_content_size >> 24) & 0xFF;
+    new_data[1] = (sei_content_size >> 16) & 0xFF;
+    new_data[2] = (sei_content_size >> 8) & 0xFF;
+    new_data[3] = sei_content_size & 0xFF;
+    
+    memcpy(new_data + 4, sei_content, sei_content_size);
+
+    memcpy(new_data + 4 + sei_content_size, packet->data, packet->size);
+    av_buffer_unref(&packet->buf);
+    packet->buf = av_buffer_create(new_data, new_size, 
+                                  av_buffer_default_free, NULL, 0);
+    packet->data = new_data;
+    packet->size = new_size;
+    return 0;
 }
 
 // Encoder Function with Initialization and Scaling
@@ -632,6 +681,7 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
 
     // Initialize TimingLogger
     TimingLogger logger(config.log_filename);
+    uint32_t response_id = 0;
 
     // Read frames from queue, encode, and write to output
     while (true) {
@@ -726,6 +776,8 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
             enc_pkt->stream_index = out_stream->index;
 
             // Write packet to output
+            ResponseInfo response_info = getResponseHeader(response_id++);
+            embed_response_header(enc_pkt, response_info);
             int write_ret = av_interleaved_write_frame(output_fmt_ctx, enc_pkt);
             if (write_ret < 0) {
                 std::cerr << "Error writing packet to output for " << config.output_url << ": " << get_error_text(write_ret) << std::endl;
