@@ -44,9 +44,9 @@ std::string get_timestamp_with_ms() {
 }
 
 int64_t get_current_time_us() {
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    return ((int64_t)tv.tv_sec * 1000000) + tv.tv_usec;
+    auto now = std::chrono::system_clock::now();
+    auto duration = now.time_since_epoch();
+    return std::chrono::duration_cast<std::chrono::microseconds>(duration).count();
 }
 
 // Structure to hold frame data and timing information
@@ -230,6 +230,13 @@ bool initialize_decoder(const char* input_url, DecoderInfo& decoder_info) {
     // Initialize input format context
     decoder_info.input_fmt_ctx = nullptr;
     AVDictionary* format_opts = nullptr;
+
+    av_dict_set(&format_opts, "buffer_size", "8192000", 0); 
+    av_dict_set(&format_opts, "overrun_nonfatal", "1", 0);      
+    av_dict_set(&format_opts, "probesize", "5000000", 0);      
+    av_dict_set(&format_opts, "analyzeduration", "5000000", 0); 
+    av_dict_set(&format_opts, "max_delay", "500000", 0);      
+    av_dict_set(&format_opts, "reuse", "1", 0);     
     if (avformat_open_input(&decoder_info.input_fmt_ctx, input_url, nullptr, &format_opts) < 0) {
         std::cerr << "Could not open input tcp stream: " << input_url << std::endl;
         av_dict_free(&format_opts);
@@ -325,7 +332,6 @@ void packet_reading_thread(AVFormatContext* input_fmt_ctx, int video_stream_idx,
         packet_queue.set_finished();
         return;
     }
-
     while (true) {
         int ret = av_read_frame(input_fmt_ctx, packet);
         if (ret < 0) {
@@ -360,7 +366,7 @@ void decoding_thread(AVCodecContext* decoder_ctx, PacketQueue& packet_queue, con
         for (auto& q : encoder_queues) q->set_finished();
         return;
     }
-
+    int64_t frame_count = 0;
     while (packet_queue.pop(packet)) {
         auto decode_start = std::chrono::steady_clock::now();
         int ret = avcodec_send_packet(decoder_ctx, packet);
@@ -379,7 +385,8 @@ void decoding_thread(AVCodecContext* decoder_ctx, PacketQueue& packet_queue, con
                 std::cerr << "Error receiving frame from decoder: " << get_error_text(ret) << std::endl;
                 break;
             }
-            // std::cout << frame->pts << ": " << get_timestamp_with_ms() << std::endl;
+            frame_count++;
+            std::cout << "Frame " << frame_count << " decoded" << std::endl;
 
             auto decode_end = std::chrono::steady_clock::now();
 
@@ -762,7 +769,7 @@ int main(int argc, char* argv[]) {
     // Maximum of 6 output URLs supported
     if (argc < 3) {
         std::cerr << "Usage: " << argv[0] 
-                  << " tcp://192.168.2.3:9000?listen=1 tcp://192.168.2.2:10000 [<output2_tcp_url> ... <output6_tcp_url>]" 
+                  << " udp://192.168.2.3:9000?listen=1 udp://192.168.2.2:10000 [<output2_tcp_url> ... <output6_tcp_url>]" 
                   << std::endl;
         std::cerr << "Supported Resolutions (in order):" << std::endl;
         std::cerr << "1. 3840x2160" << std::endl;
@@ -835,7 +842,7 @@ int main(int argc, char* argv[]) {
         encoder_configs.push_back(config);
     }
 
-    // Prepare frame queues for each encoder
+    // // Prepare frame queues for each encoder
     std::vector<FrameQueue*> frame_queues;
     for (size_t i = 0; i < encoder_configs.size(); ++i) {
         frame_queues.push_back(new FrameQueue());
@@ -849,22 +856,22 @@ int main(int argc, char* argv[]) {
     });
 
     // Start encoder threads
-    std::vector<std::thread> encoder_threads;
-    std::vector<std::atomic<bool>> enc_finished_flags(encoder_configs.size());
-    for (size_t i = 0; i < encoder_configs.size(); ++i) {
-        enc_finished_flags[i] = false;
-        encoder_threads.emplace_back([&, i]() {
-            if (!encode_frames(encoder_configs[i], *frame_queues[i], decoder_info.input_time_base, enc_finished_flags[i])) {
-                std::cerr << "Encoding failed for " << encoder_configs[i].output_url << std::endl;
-            }
-        });
-    }
+    // std::vector<std::thread> encoder_threads;
+    // std::vector<std::atomic<bool>> enc_finished_flags(encoder_configs.size());
+    // for (size_t i = 0; i < encoder_configs.size(); ++i) {
+    //     enc_finished_flags[i] = false;
+    //     encoder_threads.emplace_back([&, i]() {
+    //         if (!encode_frames(encoder_configs[i], *frame_queues[i], decoder_info.input_time_base, enc_finished_flags[i])) {
+    //             std::cerr << "Encoding failed for " << encoder_configs[i].output_url << std::endl;
+    //         }
+    //     });
+    // }
 
     // Wait for threads to finish
     decoder_thread.join();
-    for (auto& t : encoder_threads) {
-        t.join();
-    }
+    // for (auto& t : encoder_threads) {
+    //     t.join();
+    // }
 
     // Clean up frame queues
     for (auto& q : frame_queues) {
@@ -875,19 +882,19 @@ int main(int argc, char* argv[]) {
     avformat_network_deinit();
 
     // Check if all encoders finished successfully
-    bool all_success = true;
-    for (size_t i = 0; i < enc_finished_flags.size(); ++i) {
-        if (!enc_finished_flags[i]) {
-            all_success = false;
-            std::cerr << "Encoder for " << encoder_configs[i].output_url << " did not finish successfully." << std::endl;
-        }
-    }
+    // bool all_success = true;
+    // for (size_t i = 0; i < enc_finished_flags.size(); ++i) {
+    //     if (!enc_finished_flags[i]) {
+    //         all_success = false;
+    //         std::cerr << "Encoder for " << encoder_configs[i].output_url << " did not finish successfully." << std::endl;
+    //     }
+    // }
 
-    if (all_success) {
-        std::cout << "Transcoding completed successfully for all resolutions." << std::endl;
-    } else {
-        std::cerr << "Transcoding encountered errors." << std::endl;
-    }
+    // if (all_success) {
+    //     std::cout << "Transcoding completed successfully for all resolutions." << std::endl;
+    // } else {
+    //     std::cerr << "Transcoding encountered errors." << std::endl;
+    // }
 
     return 0;
 }
