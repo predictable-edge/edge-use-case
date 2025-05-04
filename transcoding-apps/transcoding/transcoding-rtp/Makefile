@@ -8,10 +8,10 @@ CXXFLAGS := -std=c++17 -Wall -O3 $(shell pkg-config --cflags libavformat libavco
 LDFLAGS := $(shell pkg-config --libs libavformat libavcodec libavutil libswscale)
 
 # Target Executable
-TARGET := transcoding-udp
+TARGET := transcoding-rtp
 
 # Source Files
-SRCS := transcoding-udp.cpp
+SRCS := transcoding-rtp.cpp
 
 RESULT := frame*
 

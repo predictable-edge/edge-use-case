@@ -230,14 +230,18 @@ bool initialize_decoder(const char* input_url, DecoderInfo& decoder_info) {
     // Initialize input format context
     decoder_info.input_fmt_ctx = nullptr;
     AVDictionary* format_opts = nullptr;
-
-    av_dict_set(&format_opts, "buffer_size", "8192000", 0); 
-    av_dict_set(&format_opts, "overrun_nonfatal", "1", 0);      
-    av_dict_set(&format_opts, "probesize", "5000000", 0);      
-    av_dict_set(&format_opts, "analyzeduration", "5000000", 0); 
-    av_dict_set(&format_opts, "max_delay", "500000", 0);      
-    av_dict_set(&format_opts, "reuse", "1", 0);     
-    if (avformat_open_input(&decoder_info.input_fmt_ctx, input_url, nullptr, &format_opts) < 0) {
+    // Set RTSP specific options
+    av_dict_set(&format_opts, "rtsp_transport", "udp", 0);       // Use UDP for RTP transport
+    av_dict_set(&format_opts, "rtsp_flags", "prefer_tcp", 0);    // Prefer TCP for RTSP control connection
+    av_dict_set(&format_opts, "buffer_size", "8192000", 0);      // Increase buffer size
+    av_dict_set(&format_opts, "max_delay", "500000", 0);         // 500ms max delay
+    av_dict_set(&format_opts, "reorder_queue_size", "10", 0);    // Reorder queue size
+    av_dict_set(&format_opts, "stimeout", "5000000", 0);         // Socket timeout 5 seconds
+    av_dict_set(&format_opts, "listen_timeout", "5000000", 0);   // Connection timeout 5 seconds
+    
+    // Set input format to RTSP
+    AVInputFormat* input_format = av_find_input_format("rtsp");
+    if (avformat_open_input(&decoder_info.input_fmt_ctx, input_url, input_format, &format_opts) < 0) {
         std::cerr << "Could not open input tcp stream: " << input_url << std::endl;
         av_dict_free(&format_opts);
         return false;
