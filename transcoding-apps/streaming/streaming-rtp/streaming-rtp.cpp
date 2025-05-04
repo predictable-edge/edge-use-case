@@ -410,7 +410,7 @@ void* push_stream_directly(void* args) {
     char *output_url = my_args[1];
 
     pthread_mutex_lock(&cout_mutex);
-    printf("[Push Thread] Starting push_stream with UDP...\n");
+    printf("[Push Thread] Starting push_stream with RTSP...\n");
     pthread_mutex_unlock(&cout_mutex);
 
     AVFormatContext* input_fmt_ctx = NULL;
@@ -435,9 +435,9 @@ void* push_stream_directly(void* args) {
 
     AVCodecParameters* codecpar = input_fmt_ctx->streams[video_stream_idx]->codecpar;
 
-    // Allocate output format context - Change from FLV to MPEGTS
+    // Allocate output format context
     AVFormatContext* output_fmt_ctx = NULL;
-    ret = avformat_alloc_output_context2(&output_fmt_ctx, NULL, "mpegts", output_url);
+    ret = avformat_alloc_output_context2(&output_fmt_ctx, NULL, "rtsp", output_url);
     if (!output_fmt_ctx) {
         fprintf(stderr, "[Push Thread] Could not create output context.\n");
         exit(1);
@@ -457,24 +457,24 @@ void* push_stream_directly(void* args) {
     out_stream->codecpar->codec_tag = 0;
 
     // Set up UDP-specific options for low latency
-    AVDictionary* udp_options = NULL;
-    av_dict_set(&udp_options, "buffer_size", "65535", 0);        // Larger buffer size
-    av_dict_set(&udp_options, "pkt_size", "1316", 0);            // Optimal packet size for MPEGTS
-    av_dict_set(&udp_options, "overrun_nonfatal", "1", 0);       // Continue on buffer overrun
-    av_dict_set(&udp_options, "flush_packets", "1", 0);          // Flush packets immediately (reduce latency)
-    av_dict_set(&udp_options, "reuse", "1", 0);                 // Allow port reuse
-    av_dict_set(&udp_options, "fifo_size", "1000000", 0);       // Set FIFO size
-    // av_dict_set(&udp_options, "bitrate", "5000000", 0);         // Set bitrate
+    AVDictionary* rtsp_options = NULL;
+    av_dict_set(&rtsp_options, "rtsp_transport", "udp", 0);        // Use UDP for RTP transport
+    av_dict_set(&rtsp_options, "listen_timeout", "5000000", 0);    // Listen timeout 5 seconds
+    av_dict_set(&rtsp_options, "max_delay", "500000", 0);          // Max delay 500ms
+    av_dict_set(&rtsp_options, "reorder_queue_size", "10", 0);     // Reorder queue size
+    av_dict_set(&rtsp_options, "buffer_size", "1048576", 0);       // 1MB buffer
+    av_dict_set(&rtsp_options, "pkt_size", "1316", 0);             // Optimal packet size
+    av_dict_set(&rtsp_options, "flush_packets", "1", 0);           // Flush packets immediately
 
     // Open output URL with UDP options
-    ret = avio_open2(&output_fmt_ctx->pb, output_url, AVIO_FLAG_WRITE, NULL, &udp_options);
-    CHECK_ERR(ret, "Could not open output URL");
+    // ret = avio_open2(&output_fmt_ctx->pb, output_url, AVIO_FLAG_WRITE, NULL, &rtsp_options);
+    // CHECK_ERR(ret, "Could not open output URL");
 
     // Set the maximum interleave delta to a very low value for decreased latency
     output_fmt_ctx->max_interleave_delta = 0;
 
     // Write header
-    ret = avformat_write_header(output_fmt_ctx, NULL);
+    ret = avformat_write_header(output_fmt_ctx, &rtsp_options);
     CHECK_ERR(ret, "Error occurred when writing header to output");
 
     AVPacket* packet = av_packet_alloc();
