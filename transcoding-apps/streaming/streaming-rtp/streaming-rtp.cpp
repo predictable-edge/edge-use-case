@@ -245,8 +245,17 @@ void* pull_stream(void* args) {
     int ret = 0;
 
     AVDictionary* options = nullptr;
+    av_dict_set(&options, "rtsp_transport", "udp", 0);       // Use UDP for RTP transport
+    av_dict_set(&options, "rtsp_flags", "prefer_tcp", 0);    // Prefer TCP for RTSP control connection
+    av_dict_set(&options, "buffer_size", "8192000", 0);      // Increase buffer size
+    av_dict_set(&options, "max_delay", "500000", 0);         // 500ms max delay
+    av_dict_set(&options, "reorder_queue_size", "10", 0);    // Reorder queue size
+    av_dict_set(&options, "stimeout", "5000000", 0);         // Socket timeout 5 seconds
+    av_dict_set(&options, "listen_timeout", "5000000", 0);   // Connection timeout 5 seconds
 
-    ret = avformat_open_input(&input_fmt_ctx, input_url, nullptr, &options);
+    // Set input format to RTSP
+    const AVInputFormat* input_format = av_find_input_format("rtsp");
+    ret = avformat_open_input(&input_fmt_ctx, input_url, input_format, &options);
     if (ret < 0) {
         pthread_mutex_lock(&cout_mutex);
         char errbuf[AV_ERROR_MAX_STRING_SIZE];
@@ -566,7 +575,7 @@ void* push_stream_directly(void* args) {
 int main(int argc, char* argv[]) {
     if (argc < 4) {
         fprintf(stderr, "Usage: %s <push_input_file> <push_output_url> <pull_input_url1> [<pull_input_url2> ...]\n", argv[0]);
-        fprintf(stderr, "Example: %s snow-scene.mp4 \"udp://192.168.2.3:9000\" \"udp://192.168.2.2:10000?listen=1\" \"udp://192.168.2.2:10001?listen=1\"\n", argv[0]);
+        fprintf(stderr, "Example: %s snow-scene.mp4 \"rtsp://192.168.2.3:9000/stream\" \"rtsp://192.168.2.2:10000/stream\"\n", argv[0]);
         return 1;
     }
 
@@ -576,6 +585,23 @@ int main(int argc, char* argv[]) {
 
     // Initialize FFmpeg network
     avformat_network_init();
+
+    // Create pull threads
+    std::vector<pthread_t> pull_thread_ids(num_pull);
+    std::vector<PullArgs*> pull_args_list(num_pull);
+
+    for (int i = 0; i < num_pull; ++i) {
+        pull_args_list[i] = new PullArgs;
+        pull_args_list[i]->input_url = argv[3 + i];
+        pull_args_list[i]->index = i + 1; // Start indexing from 1
+        pull_args_list[i]->num_pull = num_pull;
+
+        int pull_ret = pthread_create(&pull_thread_ids[i], NULL, pull_stream, pull_args_list[i]);
+        if (pull_ret != 0) {
+            fprintf(stderr, "Failed to create pull thread %d.\n", i + 1);
+            exit(1);
+        }
+    }
 
     // Create push thread
     pthread_t push_thread_id;
@@ -590,12 +616,18 @@ int main(int argc, char* argv[]) {
         fprintf(stderr, "Could not duplicate push arguments.\n");
         exit(1);
     }
-    sleep(1);
+    sleep(2);
 
     int ret_create = pthread_create(&push_thread_id, NULL, push_stream_directly, push_args);
     if (ret_create != 0) {
         fprintf(stderr, "Failed to create push thread.\n");
         exit(1);
+    }
+
+    // Wait for all pull threads to finish
+    for (int i = 0; i < num_pull; ++i) {
+        pthread_join(pull_thread_ids[i], NULL);
+        delete pull_args_list[i];
     }
 
     // Wait for push thread to finish
