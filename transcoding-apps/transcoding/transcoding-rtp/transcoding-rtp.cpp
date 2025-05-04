@@ -463,8 +463,7 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
     // Set TCP options with increased latency and specified packet size
     AVDictionary* format_opts = nullptr;
 
-    // Allocate output format context with FLV over TCP
-    if (avformat_alloc_output_context2(&output_fmt_ctx, nullptr, "flv", config.output_url.c_str()) < 0) {
+    if (avformat_alloc_output_context2(&output_fmt_ctx, nullptr, "rtsp", config.output_url.c_str()) < 0) {
         std::cerr << "Could not create output context for " << config.output_url << std::endl;
         av_dict_free(&format_opts);
         return false;
@@ -514,6 +513,13 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
     av_dict_set(&codec_opts, "preset", "ultrafast", 0);
     av_dict_set(&codec_opts, "tune", "zerolatency", 0);
     av_dict_set(&codec_opts, "delay", "0", 0);
+    av_dict_set(&codec_opts, "rtsp_transport", "udp", 0);        // Use UDP for RTP transport
+    av_dict_set(&codec_opts, "listen_timeout", "5000000", 0);    // Listen timeout 5 seconds
+    av_dict_set(&codec_opts, "max_delay", "500000", 0);          // Max delay 500ms
+    av_dict_set(&codec_opts, "reorder_queue_size", "10", 0);     // Reorder queue size
+    av_dict_set(&codec_opts, "buffer_size", "1048576", 0);       // 1MB buffer
+    av_dict_set(&codec_opts, "pkt_size", "1316", 0);             // Optimal packet size
+    av_dict_set(&codec_opts, "flush_packets", "1", 0);           // Flush packets immediately
 
     // Open encoder with codec options
     if (avcodec_open2(encoder_ctx, encoder, &codec_opts) < 0) {
@@ -652,8 +658,10 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
             std::cout << "First encoded frame PTS for " << config.output_url << ": " << first_pts << std::endl;
         }
 
-        // Set PTS based on frame counter
-        enc_frame->pts = av_rescale_q(frame_data.frame->pts, input_time_base, encoder_ctx->time_base);
+        // Generate monotonically increasing PTS based on frame counter
+        // This ensures we don't have timestamp ordering issues
+        enc_frame->pts = frame_count;
+        enc_frame->pkt_dts = frame_count;
 
         // Send frame to encoder
         int ret = avcodec_send_frame(encoder_ctx, enc_frame);
@@ -681,11 +689,15 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
                 break;
             }
 
-            // Rescale packet timestamp
+            // Set packet timestamps to ensure monotonically increasing values
+            enc_pkt->pts = frame_count;
+            enc_pkt->dts = frame_count;
+            
+            // Rescale packet timestamp to output stream's time base
             av_packet_rescale_ts(enc_pkt, encoder_ctx->time_base, out_stream->time_base);
             enc_pkt->stream_index = out_stream->index;
 
-            // Write packet to output
+            // Write packet to output - using interleaved write to properly handle timestamp ordering
             int write_ret = av_interleaved_write_frame(output_fmt_ctx, enc_pkt);
             if (write_ret < 0) {
                 std::cerr << "Error writing packet to output for " << config.output_url << ": " << get_error_text(write_ret) << std::endl;
@@ -734,11 +746,15 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
             break;
         }
 
-        // Rescale packet timestamp
+        // Set packet timestamps to ensure monotonically increasing values
+        enc_pkt->pts = frame_count;
+        enc_pkt->dts = frame_count;
+        
+        // Rescale packet timestamp to output stream's time base
         av_packet_rescale_ts(enc_pkt, encoder_ctx->time_base, out_stream->time_base);
         enc_pkt->stream_index = out_stream->index;
 
-        // Write flushed packet to output
+        // Write flushed packet to output - using interleaved write to properly handle timestamp ordering
         int write_ret = av_interleaved_write_frame(output_fmt_ctx, enc_pkt);
         if (write_ret < 0) {
             std::cerr << "Error writing flushed packet to output for " << config.output_url << ": " << get_error_text(write_ret) << std::endl;
@@ -773,7 +789,7 @@ int main(int argc, char* argv[]) {
     // Maximum of 6 output URLs supported
     if (argc < 3) {
         std::cerr << "Usage: " << argv[0] 
-                  << " udp://192.168.2.3:9000?listen=1 udp://192.168.2.2:10000 [<output2_tcp_url> ... <output6_tcp_url>]" 
+                  << " rtsp://192.168.2.3:9000/stream rtsp://192.168.2.2:10000/stream" 
                   << std::endl;
         std::cerr << "Supported Resolutions (in order):" << std::endl;
         std::cerr << "1. 3840x2160" << std::endl;
@@ -804,14 +820,6 @@ int main(int argc, char* argv[]) {
         {854,  480,  1000,  "frame-5"},
         {640,  360,  600,   "frame-6"}
     };
-    // std::vector<ResolutionBitrateLog> resolution_bitrate_log = {
-    //     {2560, 1440, 4000,  "frame-1"},
-    //     {2560, 1440, 4000,  "frame-2"},
-    //     {2560, 1440, 4000,  "frame-3"},
-    //     {2560, 1440, 4000,  "frame-4"},
-    //     {2560, 1440, 4000,  "frame-5"},
-    //     {2560, 1440, 4000,  "frame-6"}
-    // };
 
     if (num_outputs > (int) resolution_bitrate_log.size()) {
         std::cerr << "Error: Maximum supported output URLs is " << resolution_bitrate_log.size() << "." << std::endl;
@@ -860,22 +868,22 @@ int main(int argc, char* argv[]) {
     });
 
     // Start encoder threads
-    // std::vector<std::thread> encoder_threads;
-    // std::vector<std::atomic<bool>> enc_finished_flags(encoder_configs.size());
-    // for (size_t i = 0; i < encoder_configs.size(); ++i) {
-    //     enc_finished_flags[i] = false;
-    //     encoder_threads.emplace_back([&, i]() {
-    //         if (!encode_frames(encoder_configs[i], *frame_queues[i], decoder_info.input_time_base, enc_finished_flags[i])) {
-    //             std::cerr << "Encoding failed for " << encoder_configs[i].output_url << std::endl;
-    //         }
-    //     });
-    // }
+    std::vector<std::thread> encoder_threads;
+    std::vector<std::atomic<bool>> enc_finished_flags(encoder_configs.size());
+    for (size_t i = 0; i < encoder_configs.size(); ++i) {
+        enc_finished_flags[i] = false;
+        encoder_threads.emplace_back([&, i]() {
+            if (!encode_frames(encoder_configs[i], *frame_queues[i], decoder_info.input_time_base, enc_finished_flags[i])) {
+                std::cerr << "Encoding failed for " << encoder_configs[i].output_url << std::endl;
+            }
+        });
+    }
 
     // Wait for threads to finish
     decoder_thread.join();
-    // for (auto& t : encoder_threads) {
-    //     t.join();
-    // }
+    for (auto& t : encoder_threads) {
+        t.join();
+    }
 
     // Clean up frame queues
     for (auto& q : frame_queues) {
@@ -886,19 +894,19 @@ int main(int argc, char* argv[]) {
     avformat_network_deinit();
 
     // Check if all encoders finished successfully
-    // bool all_success = true;
-    // for (size_t i = 0; i < enc_finished_flags.size(); ++i) {
-    //     if (!enc_finished_flags[i]) {
-    //         all_success = false;
-    //         std::cerr << "Encoder for " << encoder_configs[i].output_url << " did not finish successfully." << std::endl;
-    //     }
-    // }
+    bool all_success = true;
+    for (size_t i = 0; i < enc_finished_flags.size(); ++i) {
+        if (!enc_finished_flags[i]) {
+            all_success = false;
+            std::cerr << "Encoder for " << encoder_configs[i].output_url << " did not finish successfully." << std::endl;
+        }
+    }
 
-    // if (all_success) {
-    //     std::cout << "Transcoding completed successfully for all resolutions." << std::endl;
-    // } else {
-    //     std::cerr << "Transcoding encountered errors." << std::endl;
-    // }
+    if (all_success) {
+        std::cout << "Transcoding completed successfully for all resolutions." << std::endl;
+    } else {
+        std::cerr << "Transcoding encountered errors." << std::endl;
+    }
 
     return 0;
 }
