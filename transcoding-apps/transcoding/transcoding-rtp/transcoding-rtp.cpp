@@ -336,6 +336,7 @@ void packet_reading_thread(AVFormatContext* input_fmt_ctx, int video_stream_idx,
         packet_queue.set_finished();
         return;
     }
+    // int frame_count = 0;
     while (true) {
         int ret = av_read_frame(input_fmt_ctx, packet);
         if (ret < 0) {
@@ -343,6 +344,8 @@ void packet_reading_thread(AVFormatContext* input_fmt_ctx, int video_stream_idx,
             std::cerr << "Error reading frame: " << get_error_text(ret) << std::endl;
             break;
         }
+        // frame_count++;
+        // std::cout << "Frame " << frame_count << " read at " << get_current_time_us() << std::endl;
 
         if (packet->stream_index == video_stream_idx) {
             packet_queue.push(packet);
@@ -370,7 +373,6 @@ void decoding_thread(AVCodecContext* decoder_ctx, PacketQueue& packet_queue, con
         for (auto& q : encoder_queues) q->set_finished();
         return;
     }
-    int64_t frame_count = 0;
     while (packet_queue.pop(packet)) {
         auto decode_start = std::chrono::steady_clock::now();
         int ret = avcodec_send_packet(decoder_ctx, packet);
@@ -389,8 +391,6 @@ void decoding_thread(AVCodecContext* decoder_ctx, PacketQueue& packet_queue, con
                 std::cerr << "Error receiving frame from decoder: " << get_error_text(ret) << std::endl;
                 break;
             }
-            frame_count++;
-            std::cout << "Frame " << frame_count << " decoded" << std::endl;
 
             auto decode_end = std::chrono::steady_clock::now();
 
