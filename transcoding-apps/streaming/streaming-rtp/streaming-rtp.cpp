@@ -534,6 +534,7 @@ void* push_stream_directly(void* args) {
                 break;
             }
             frame_count++;
+            // std::cout << "Frame " << frame_count << " pushed at " << get_current_time_us() << std::endl;
         }
         av_packet_unref(packet);
     }
