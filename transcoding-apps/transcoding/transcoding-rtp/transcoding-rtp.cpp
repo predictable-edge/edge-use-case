@@ -31,7 +31,6 @@ std::string get_error_text(int errnum);
 std::string get_timestamp_with_ms();
 int64_t get_current_time_us();
 void add_timestamp_to_packet(AVPacket* pkt);
-AVPacket* create_empty_packet(int stream_index, int64_t pts);
 
 // Helper function to convert FFmpeg error codes to std::string
 std::string get_error_text(int errnum) {
@@ -734,20 +733,6 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
                 break;
             }
             std::cout << "Encoded frame " << frame_count + 1 << " at " << get_current_time_us() << std::endl;
-
-            // Create and send an empty packet after each encoded packet
-            AVPacket* empty_pkt = create_empty_packet(enc_pkt->stream_index, enc_pkt->pts + 1);
-            if (empty_pkt) {
-                int empty_ret = av_write_frame(output_fmt_ctx, empty_pkt);
-                if (empty_ret < 0) {
-                    std::cerr << "Error writing empty packet to output for " << config.output_url << ": " << get_error_text(empty_ret) << std::endl;
-                    av_packet_free(&empty_pkt);
-                } else {
-                    std::cout << "Sent empty packet after frame " << frame_count << std::endl;
-                }
-                av_packet_free(&empty_pkt);
-            }
-
             av_packet_free(&enc_pkt);
         }
 
@@ -807,20 +792,6 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
             av_packet_free(&enc_pkt);
             break;
         }
-
-        // Create and send an empty packet after each encoded packet
-        AVPacket* empty_pkt = create_empty_packet(enc_pkt->stream_index, enc_pkt->pts);
-        if (empty_pkt) {
-            int empty_ret = av_write_frame(output_fmt_ctx, empty_pkt);
-            if (empty_ret < 0) {
-                std::cerr << "Error writing empty packet to output for " << config.output_url << ": " << get_error_text(empty_ret) << std::endl;
-                av_packet_free(&empty_pkt);
-            } else {
-                std::cout << "Sent empty packet after flush frame" << std::endl;
-            }
-            av_packet_free(&empty_pkt);
-        }
-
         av_packet_free(&enc_pkt);
     }
 
@@ -885,31 +856,6 @@ void add_timestamp_to_packet(AVPacket* pkt) {
     
     // Free the new packet structure (data has been moved to original packet)
     av_packet_free(&new_pkt);
-}
-
-AVPacket* create_empty_packet(int stream_index, int64_t pts) {
-    AVPacket* empty_pkt = av_packet_alloc();
-    if (!empty_pkt) return nullptr;
-    
-    const int PACKET_SIZE = 20;
-    int ret = av_new_packet(empty_pkt, PACKET_SIZE);
-    if (ret < 0) {
-        av_packet_free(&empty_pkt);
-        return nullptr;
-    }
-    
-    empty_pkt->stream_index = stream_index;
-    empty_pkt->pts = pts;
-    empty_pkt->dts = pts;
-    empty_pkt->flags = 0;
-    
-    empty_pkt->data[0] = 0xFF;
-    memcpy(empty_pkt->data + 1, "EMPT", 4);
-    
-    int64_t timestamp = get_current_time_us();
-    memcpy(empty_pkt->data + 5, &timestamp, sizeof(int64_t));
-    
-    return empty_pkt;
 }
 
 int main(int argc, char* argv[]) {
