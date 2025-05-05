@@ -460,10 +460,15 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
     AVFormatContext* output_fmt_ctx = nullptr;
     AVStream* out_stream = nullptr;
 
-    // Set TCP options with increased latency and specified packet size
+    // Set RTP options
     AVDictionary* format_opts = nullptr;
+    av_dict_set(&format_opts, "ttl", "5", 0);                  // Time-to-live for multicast
+    av_dict_set(&format_opts, "buffer_size", "1048576", 0);    // 1MB buffer
+    av_dict_set(&format_opts, "pkt_size", "1316", 0);          // Optimal RTP packet size
+    av_dict_set(&format_opts, "flush_packets", "1", 0);        // Flush packets immediately
 
-    if (avformat_alloc_output_context2(&output_fmt_ctx, nullptr, "rtsp", config.output_url.c_str()) < 0) {
+    // Create output format context for RTP instead of RTSP
+    if (avformat_alloc_output_context2(&output_fmt_ctx, nullptr, "rtp", config.output_url.c_str()) < 0) {
         std::cerr << "Could not create output context for " << config.output_url << std::endl;
         av_dict_free(&format_opts);
         return false;
@@ -501,7 +506,7 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
     encoder_ctx->width = config.width;
     encoder_ctx->sample_aspect_ratio = AVRational{1, 1}; // Square pixels
     encoder_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
-    encoder_ctx->time_base = AVRational{1, static_cast<int>(config.framerate)};          // 30 fps
+    encoder_ctx->time_base = AVRational{1, static_cast<int>(config.framerate)};          // Use input framerate
     encoder_ctx->framerate = AVRational{static_cast<int>(config.framerate), 1};
     encoder_ctx->bit_rate = static_cast<int>(config.bitrate * 1000 * 30 / config.framerate);       // Convert kbps to bps
     encoder_ctx->gop_size = static_cast<int>(config.framerate);
@@ -512,15 +517,13 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
     AVDictionary* codec_opts = nullptr;
     av_dict_set(&codec_opts, "preset", "ultrafast", 0);
     av_dict_set(&codec_opts, "tune", "zerolatency", 0);
-    av_dict_set(&codec_opts, "delay", "0", 0);
-    av_dict_set(&codec_opts, "rtsp_transport", "udp", 0);        // Use UDP for RTP transport
-    av_dict_set(&codec_opts, "listen_timeout", "5000000", 0);    // Listen timeout 5 seconds
-    av_dict_set(&codec_opts, "max_delay", "0", 0);         
-    av_dict_set(&codec_opts, "reorder_queue_size", "0", 0);    // Reorder queue size
-    av_dict_set(&codec_opts, "fifo_size", "0", 0);
-    av_dict_set(&codec_opts, "buffer_size", "1048576", 0);       // 1MB buffer
-    av_dict_set(&codec_opts, "pkt_size", "1316", 0);             // Optimal packet size
-    av_dict_set(&codec_opts, "flush_packets", "1", 0);           // Flush packets immediately
+    // av_dict_set(&codec_opts, "delay", "0", 0);
+    // av_dict_set(&codec_opts, "max_delay", "0", 0);
+    // Remove RTSP-specific options
+    // av_dict_set(&codec_opts, "fifo_size", "0", 0);
+    av_dict_set(&codec_opts, "buffer_size", "1048576", 0);     // 1MB buffer
+    av_dict_set(&codec_opts, "pkt_size", "1316", 0);           // Optimal packet size
+    av_dict_set(&codec_opts, "flush_packets", "1", 0);         // Flush packets immediately
 
     // Open encoder with codec options
     if (avcodec_open2(encoder_ctx, encoder, &codec_opts) < 0) {
@@ -543,6 +546,24 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
     }
 
     out_stream->time_base = encoder_ctx->time_base;
+
+    char sdp_buffer[4096];
+    int sdp_ret = av_sdp_create(&output_fmt_ctx, 1, sdp_buffer, sizeof(sdp_buffer));
+    if (sdp_ret < 0) {
+        std::cerr << "Failed to create SDP" << std::endl;
+    } else {
+        // Save SDP to file
+        std::ofstream sdp_file("stream.sdp");
+        if (sdp_file.is_open()) {
+            sdp_file << sdp_buffer;
+            sdp_file.close();
+            std::cout << "SDP file generated: stream.sdp" << std::endl;
+            std::cout << "SDP Content:\n" << sdp_buffer << std::endl;
+            std::cout << "----------------------\n";
+        } else {
+            std::cerr << "Could not open stream.sdp for writing" << std::endl;
+        }
+    }
 
     // Open output URL with format options
     if (!(output_fmt_ctx->oformat->flags & AVFMT_NOFILE)) {
@@ -786,7 +807,7 @@ int main(int argc, char* argv[]) {
     // Maximum of 6 output URLs supported
     if (argc < 3) {
         std::cerr << "Usage: " << argv[0] 
-                  << " rtsp://192.168.2.3:9000/stream rtsp://192.168.2.2:10000/stream" 
+                  << " rtsp://192.168.2.3:9000/stream rtp://192.168.2.2:5004" 
                   << std::endl;
         std::cerr << "Supported Resolutions (in order):" << std::endl;
         std::cerr << "1. 3840x2160" << std::endl;
