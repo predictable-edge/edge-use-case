@@ -30,6 +30,9 @@ extern "C" {
 #include <climits>
 }
 
+// Forward declarations
+int64_t extract_timestamp_from_packet(AVPacket* pkt);
+
 #define CHECK_ERR(err, msg) \
     if ((err) < 0) { \
         char errbuf[AV_ERROR_MAX_STRING_SIZE]; \
@@ -246,10 +249,11 @@ void* pull_stream(void* args) {
     AVDictionary* options = nullptr;
     // RTP specific options
     av_dict_set(&options, "buffer_size", "1048576", 0);      // Increase buffer size to 1MB
-    // av_dict_set(&options, "reorder_queue_size", "0", 0);     // Disable reordering for lower latency
-    // av_dict_set(&options, "max_delay", "0", 0);              // Minimize buffering delay
+    av_dict_set(&options, "reorder_queue_size", "0", 0);     // Disable reordering for lower latency
+    av_dict_set(&options, "max_delay", "0", 0);              // Minimize buffering delay
     av_dict_set(&options, "flags", "low_delay", 0);          // Enable low delay
     av_dict_set(&options, "protocol_whitelist", "file,rtp,udp", 0);
+    av_dict_set(&options, "aud", "1", 0);
     // Set timeout for RTP stream
     av_dict_set(&options, "timeout", "5000000", 0);  // 5 seconds timeout
 
@@ -442,9 +446,23 @@ void* pull_stream(void* args) {
         last_packet_time = get_current_time_us();
 
         if (packet->stream_index == video_stream_index) {
+            // Extract embedded timestamp from packet
+            int64_t embedded_timestamp = extract_timestamp_from_packet(packet);
+            
             int64_t pull_time_ms_before_dec = get_current_time_us() / 1000;
             int64_t pull_time_ms = get_current_time_us() / 1000;
-            std::cout << "Frame " << frame_count + 1 << " pulled at " << get_current_time_us() << std::endl;
+            
+            if (embedded_timestamp > 0) {
+                int64_t latency_us = get_current_time_us() - embedded_timestamp;
+                pthread_mutex_lock(&cout_mutex);
+                std::cout << "Frame " << frame_count + 1 << " pulled at " << get_current_time_us() 
+                          << ", embedded timestamp: " << embedded_timestamp
+                          << ", latency: " << latency_us << " us (" << (latency_us/1000.0) << " ms)" << std::endl;
+                pthread_mutex_unlock(&cout_mutex);
+            } else {
+                std::cout << "Frame " << frame_count + 1 << " pulled at " << get_current_time_us() 
+                          << " (no valid embedded timestamp)" << std::endl;
+            }
 
             // Add entry to TimingLogger
             logger.add_entry(
@@ -634,6 +652,57 @@ void* push_stream_directly(void* args) {
     pthread_mutex_unlock(&cout_mutex);
 
     return NULL;
+}
+
+// Function to extract timestamp from packet and restore original packet
+int64_t extract_timestamp_from_packet(AVPacket* pkt) {
+    // Check if packet is large enough to contain timestamp
+    if (pkt->size <= sizeof(int64_t)) {
+        std::cerr << "Packet too small to contain timestamp" << std::endl;
+        return -1;
+    }
+    
+    // Extract timestamp from the end of packet data
+    int64_t timestamp;
+    memcpy(&timestamp, pkt->data + pkt->size - sizeof(int64_t), sizeof(int64_t));
+    
+    // Create a new packet for the original data (without timestamp)
+    AVPacket* new_pkt = av_packet_alloc();
+    if (!new_pkt) {
+        std::cerr << "Could not allocate new packet" << std::endl;
+        return -1;
+    }
+    
+    // Allocate memory for original data size (excluding timestamp)
+    int original_size = pkt->size - sizeof(int64_t);
+    int ret = av_new_packet(new_pkt, original_size);
+    if (ret < 0) {
+        std::cerr << "Could not allocate packet data" << std::endl;
+        av_packet_free(&new_pkt);
+        return -1;
+    }
+    
+    // Copy original data (excluding timestamp)
+    memcpy(new_pkt->data, pkt->data, original_size);
+    
+    // Copy other packet properties
+    new_pkt->pts = pkt->pts;
+    new_pkt->dts = pkt->dts;
+    new_pkt->stream_index = pkt->stream_index;
+    new_pkt->flags = pkt->flags;
+    new_pkt->duration = pkt->duration;
+    new_pkt->pos = pkt->pos;
+    
+    // Release original packet
+    av_packet_unref(pkt);
+    
+    // Move new packet content to original packet
+    av_packet_move_ref(pkt, new_pkt);
+    
+    // Free the new packet structure (data has been moved to original packet)
+    av_packet_free(&new_pkt);
+    
+    return timestamp;
 }
 
 int main(int argc, char* argv[]) {
