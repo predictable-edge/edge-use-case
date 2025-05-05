@@ -224,7 +224,6 @@ struct PullArgs {
 // Modified pull_stream function to handle multiple pull URLs and logging
 void* pull_stream(void* args) {
     PullArgs* pull_args = static_cast<PullArgs*>(args);
-    char* input_url = pull_args->input_url;
     int index = pull_args->index;
     int num_pull = pull_args->num_pull;
 
@@ -236,7 +235,7 @@ void* pull_stream(void* args) {
     TimingLogger logger(log_filename);
 
     pthread_mutex_lock(&cout_mutex);
-    std::cout << "[Pull Thread " << index << "] Starting pull_stream..." << std::endl;
+    std::cout << "[Pull Thread " << index << "] Starting pull_stream with RTP..." << std::endl;
     pthread_mutex_unlock(&cout_mutex);
 
     avformat_network_init();
@@ -245,30 +244,41 @@ void* pull_stream(void* args) {
     int ret = 0;
 
     AVDictionary* options = nullptr;
-    av_dict_set(&options, "rtsp_transport", "udp", 0);       // Use UDP for RTP transport
-    av_dict_set(&options, "buffer_size", "100000", 0);      // Increase buffer size
-    av_dict_set(&options, "max_delay", "0", 0);         
-    av_dict_set(&options, "reorder_queue_size", "0", 0);    // Reorder queue size
-    av_dict_set(&options, "fifo_size", "0", 0);
-    av_dict_set(&options, "stimeout", "5000000", 0);         // Socket timeout 5 seconds
-    av_dict_set(&options, "listen_timeout", "5000000", 0);   // Connection timeout 5 seconds
-    av_dict_set(&options, "avioflags", "direct", 0);
-    av_dict_set(&options, "fflags", "nobuffer", 0);
+    // RTP specific options
+    av_dict_set(&options, "buffer_size", "1048576", 0);      // Increase buffer size to 1MB
+    // av_dict_set(&options, "reorder_queue_size", "0", 0);     // Disable reordering for lower latency
+    // av_dict_set(&options, "max_delay", "0", 0);              // Minimize buffering delay
+    av_dict_set(&options, "flags", "low_delay", 0);          // Enable low delay
+    av_dict_set(&options, "protocol_whitelist", "file,rtp,udp", 0);
 
-    // Set input format to RTSP
-    const AVInputFormat* input_format = av_find_input_format("rtsp");
-    ret = avformat_open_input(&input_fmt_ctx, input_url, input_format, &options);
+    // Set input format to RTP
+    std::string sdp_file = "stream.sdp";
+    ret = avformat_open_input(&input_fmt_ctx, sdp_file.c_str(), nullptr, &options);
     if (ret < 0) {
         pthread_mutex_lock(&cout_mutex);
         char errbuf[AV_ERROR_MAX_STRING_SIZE];
         av_strerror(ret, errbuf, sizeof(errbuf));
-        std::cerr << "[Pull Thread " << index << "] Could not open input: " << errbuf << std::endl;
+        std::cerr << "[Pull Thread " << index << "] Could not open SDP file: " << errbuf << std::endl;
         pthread_mutex_unlock(&cout_mutex);
 
         av_dict_free(&options);
         avformat_network_deinit();
         return nullptr;
     }
+
+    // Open RTP input
+    // ret = avformat_open_input(&input_fmt_ctx, input_url, input_format, &options);
+    // if (ret < 0) {
+    //     pthread_mutex_lock(&cout_mutex);
+    //     char errbuf[AV_ERROR_MAX_STRING_SIZE];
+    //     av_strerror(ret, errbuf, sizeof(errbuf));
+    //     std::cerr << "[Pull Thread " << index << "] Could not open RTP input: " << errbuf << std::endl;
+    //     pthread_mutex_unlock(&cout_mutex);
+
+    //     av_dict_free(&options);
+    //     avformat_network_deinit();
+    //     return nullptr;
+    // }
 
     ret = avformat_find_stream_info(input_fmt_ctx, nullptr);
     if (ret < 0) {
@@ -578,7 +588,7 @@ void* push_stream_directly(void* args) {
 int main(int argc, char* argv[]) {
     if (argc < 4) {
         fprintf(stderr, "Usage: %s <push_input_file> <push_output_url> <pull_input_url1> [<pull_input_url2> ...]\n", argv[0]);
-        fprintf(stderr, "Example: %s snow-scene.mp4 \"rtsp://192.168.2.3:9000/stream\" \"rtsp://192.168.2.2:10000/stream\"\n", argv[0]);
+        fprintf(stderr, "Example: %s snow-scene.mp4 \"rtsp://192.168.2.3:9000/stream\" \"rtp://192.168.2.2:5004\"\n", argv[0]);
         return 1;
     }
 
