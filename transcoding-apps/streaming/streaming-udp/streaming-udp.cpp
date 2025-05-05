@@ -236,7 +236,7 @@ void* pull_stream(void* args) {
     TimingLogger logger(log_filename);
 
     pthread_mutex_lock(&cout_mutex);
-    std::cout << "[Pull Thread " << index << "] Starting pull_stream..." << std::endl;
+    std::cout << "[Pull Thread " << index << "] Starting pull_stream with UDP H264..." << std::endl;
     pthread_mutex_unlock(&cout_mutex);
 
     avformat_network_init();
@@ -245,19 +245,38 @@ void* pull_stream(void* args) {
     int ret = 0;
 
     AVDictionary* options = nullptr;
-    av_dict_set(&options, "rtsp_transport", "udp", 0);       // Use UDP for RTP transport
-    av_dict_set(&options, "buffer_size", "100000", 0);      // Increase buffer size
-    av_dict_set(&options, "max_delay", "0", 0);         
-    av_dict_set(&options, "reorder_queue_size", "0", 0);    // Reorder queue size
-    av_dict_set(&options, "fifo_size", "0", 0);
-    av_dict_set(&options, "stimeout", "5000000", 0);         // Socket timeout 5 seconds
-    av_dict_set(&options, "listen_timeout", "5000000", 0);   // Connection timeout 5 seconds
-    av_dict_set(&options, "avioflags", "direct", 0);
-    av_dict_set(&options, "fflags", "nobuffer", 0);
+    // Configure UDP-specific options for low latency
+    av_dict_set(&options, "buffer_size", "8192000", 0);      // Increase buffer size
+    av_dict_set(&options, "reuse", "1", 0);                  // Allow port reuse
+    av_dict_set(&options, "max_delay", "0", 0);              // Minimize delay
+    av_dict_set(&options, "timeout", "5000000", 0);          // Socket timeout in microseconds
+    av_dict_set(&options, "fifo_size", "0", 0);              // No FIFO buffering
+    av_dict_set(&options, "overrun_nonfatal", "1", 0);       // Continue on buffer overrun
 
-    // Set input format to RTSP
-    const AVInputFormat* input_format = av_find_input_format("rtsp");
+    // Try to open as h264 first
+    const AVInputFormat* input_format = av_find_input_format("h264");
     ret = avformat_open_input(&input_fmt_ctx, input_url, input_format, &options);
+    
+    // If h264 format fails, try with mpegts
+    if (ret < 0) {
+        pthread_mutex_lock(&cout_mutex);
+        std::cout << "[Pull Thread " << index << "] H264 format failed, trying mpegts..." << std::endl;
+        pthread_mutex_unlock(&cout_mutex);
+        
+        av_dict_free(&options);
+        options = nullptr;
+        
+        // Reinitialize options for mpegts
+        av_dict_set(&options, "buffer_size", "8192000", 0);
+        av_dict_set(&options, "reuse", "1", 0);
+        av_dict_set(&options, "max_delay", "0", 0);
+        av_dict_set(&options, "timeout", "5000000", 0);
+        av_dict_set(&options, "fifo_size", "0", 0);
+        
+        input_format = av_find_input_format("mpegts");
+        ret = avformat_open_input(&input_fmt_ctx, input_url, input_format, &options);
+    }
+
     if (ret < 0) {
         pthread_mutex_lock(&cout_mutex);
         char errbuf[AV_ERROR_MAX_STRING_SIZE];
@@ -336,12 +355,17 @@ void* pull_stream(void* args) {
         avformat_network_deinit();
         return nullptr;
     }
-    // codec_ctx->thread_count = 1;
+    
+    // Set low-latency decoding options
     codec_ctx->flags |= AV_CODEC_FLAG_LOW_DELAY;
-    // codec_ctx->thread_count = 0;
-    // codec_ctx->flags2 |= AV_CODEC_FLAG2_FAST;
+    codec_ctx->flags2 |= AV_CODEC_FLAG2_FAST;
+    
+    // Speed up decoding
+    AVDictionary* codec_options = nullptr;
+    av_dict_set(&codec_options, "threads", "1", 0);   // Use single thread for lower latency
+    av_dict_set(&codec_options, "strict", "-2", 0);    // Less strict decoding compliance
 
-    ret = avcodec_open2(codec_ctx, codec, nullptr);
+    ret = avcodec_open2(codec_ctx, codec, &codec_options);
     if (ret < 0) {
         pthread_mutex_lock(&cout_mutex);
         std::cerr << "[Pull Thread " << index << "] Could not open codec" << std::endl;
@@ -349,6 +373,7 @@ void* pull_stream(void* args) {
         avcodec_free_context(&codec_ctx);
         avformat_close_input(&input_fmt_ctx);
         av_dict_free(&options);
+        av_dict_free(&codec_options);
         avformat_network_deinit();
         return nullptr;
     }
@@ -361,6 +386,7 @@ void* pull_stream(void* args) {
         avcodec_free_context(&codec_ctx);
         avformat_close_input(&input_fmt_ctx);
         av_dict_free(&options);
+        av_dict_free(&codec_options);
         avformat_network_deinit();
         return nullptr;
     }
@@ -374,16 +400,26 @@ void* pull_stream(void* args) {
         avcodec_free_context(&codec_ctx);
         avformat_close_input(&input_fmt_ctx);
         av_dict_free(&options);
+        av_dict_free(&codec_options);
         avformat_network_deinit();
         return nullptr;
     }
+
+    pthread_mutex_lock(&cout_mutex);
+    std::cout << "[Pull Thread " << index << "] Started receiving H264 stream over UDP" << std::endl;
+    pthread_mutex_unlock(&cout_mutex);
 
     int64_t frame_count = 0;
     while (av_read_frame(input_fmt_ctx, packet) >= 0) {
         if (packet->stream_index == video_stream_index) {
             int64_t pull_time_ms_before_dec = get_current_time_us() / 1000;
+            
+            // Process the packet for logging (we don't need to decode for this example)
             int64_t pull_time_ms = get_current_time_us() / 1000;
-            std::cout << "Frame " << frame_count + 1 << " pulled at " << get_current_time_us() << std::endl;
+            
+            pthread_mutex_lock(&cout_mutex);
+            std::cout << "Frame " << frame_count + 1 << " received at " << get_current_time_us() << std::endl;
+            pthread_mutex_unlock(&cout_mutex);
 
             // Add entry to TimingLogger
             logger.add_entry(
@@ -402,15 +438,17 @@ void* pull_stream(void* args) {
     // Write the log to file
     logger.write_to_file();
 
+    // Clean up resources
     av_packet_free(&packet);
     av_frame_free(&frame);
     avcodec_free_context(&codec_ctx);
     avformat_close_input(&input_fmt_ctx);
     av_dict_free(&options);
+    av_dict_free(&codec_options);
     avformat_network_deinit();
 
     pthread_mutex_lock(&cout_mutex);
-    std::cout << "[Pull Thread " << index << "] Finished pull_stream." << std::endl;
+    std::cout << "[Pull Thread " << index << "] Finished pull_stream. Processed " << frame_count << " frames." << std::endl;
     pthread_mutex_unlock(&cout_mutex);
 
     return nullptr;
@@ -578,7 +616,7 @@ void* push_stream_directly(void* args) {
 int main(int argc, char* argv[]) {
     if (argc < 4) {
         fprintf(stderr, "Usage: %s <push_input_file> <push_output_url> <pull_input_url1> [<pull_input_url2> ...]\n", argv[0]);
-        fprintf(stderr, "Example: %s snow-scene.mp4 \"rtsp://192.168.2.3:9000/stream\" \"rtsp://192.168.2.2:10000/stream\"\n", argv[0]);
+        fprintf(stderr, "Example: %s snow-scene.mp4 \"rtsp://192.168.2.3:9000/stream\" \"udp://192.168.2.2:10000\"\n", argv[0]);
         return 1;
     }
 
