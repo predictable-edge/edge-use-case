@@ -14,6 +14,8 @@
 #include <assert.h>
 #include <vector>
 #include <filesystem>
+#include <memory.h>
+#include <string.h> // For memcpy
 
 // FFmpeg includes
 extern "C" {
@@ -23,6 +25,13 @@ extern "C" {
 #include <libavutil/imgutils.h>
 #include <libswscale/swscale.h>
 }
+
+// Function declarations
+std::string get_error_text(int errnum);
+std::string get_timestamp_with_ms();
+int64_t get_current_time_us();
+void add_timestamp_to_packet(AVPacket* pkt);
+AVPacket* create_empty_packet(int stream_index, int64_t pts);
 
 // Helper function to convert FFmpeg error codes to std::string
 std::string get_error_text(int errnum) {
@@ -518,9 +527,9 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
     av_dict_set(&codec_opts, "preset", "ultrafast", 0);
     av_dict_set(&codec_opts, "tune", "zerolatency", 0);
     // av_dict_set(&codec_opts, "delay", "0", 0);
-    // av_dict_set(&codec_opts, "max_delay", "0", 0);
+    av_dict_set(&codec_opts, "max_delay", "0", 0);
     // Remove RTSP-specific options
-    // av_dict_set(&codec_opts, "fifo_size", "0", 0);
+    av_dict_set(&codec_opts, "fifo_size", "0", 0);
     av_dict_set(&codec_opts, "buffer_size", "1048576", 0);     // 1MB buffer
     av_dict_set(&codec_opts, "pkt_size", "1316", 0);           // Optimal packet size
     av_dict_set(&codec_opts, "flush_packets", "1", 0);         // Flush packets immediately
@@ -714,6 +723,9 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
             av_packet_rescale_ts(enc_pkt, encoder_ctx->time_base, out_stream->time_base);
             enc_pkt->stream_index = out_stream->index;
 
+            // Add timestamp directly to packet data
+            add_timestamp_to_packet(enc_pkt);
+
             // Write packet to output - using interleaved write to properly handle timestamp ordering
             int write_ret = av_write_frame(output_fmt_ctx, enc_pkt);
             if (write_ret < 0) {
@@ -722,6 +734,19 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
                 break;
             }
             std::cout << "Encoded frame " << frame_count + 1 << " at " << get_current_time_us() << std::endl;
+
+            // Create and send an empty packet after each encoded packet
+            AVPacket* empty_pkt = create_empty_packet(enc_pkt->stream_index, enc_pkt->pts + 1);
+            if (empty_pkt) {
+                int empty_ret = av_write_frame(output_fmt_ctx, empty_pkt);
+                if (empty_ret < 0) {
+                    std::cerr << "Error writing empty packet to output for " << config.output_url << ": " << get_error_text(empty_ret) << std::endl;
+                    av_packet_free(&empty_pkt);
+                } else {
+                    std::cout << "Sent empty packet after frame " << frame_count << std::endl;
+                }
+                av_packet_free(&empty_pkt);
+            }
 
             av_packet_free(&enc_pkt);
         }
@@ -733,7 +758,7 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
         double encode_time = std::chrono::duration<double, std::milli>(encode_end - encode_start).count();
         double interval_time = std::chrono::duration<double, std::milli>(encode_end - frame_data.decode_start_time).count();
 
-        frame_count++;
+        frame_count += 2;
         logger.add_entry(frame_count, decode_time, encode_time, interval_time);
 
         if (frame_count % 100 == 0) {
@@ -772,12 +797,28 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
         av_packet_rescale_ts(enc_pkt, encoder_ctx->time_base, out_stream->time_base);
         enc_pkt->stream_index = out_stream->index;
 
+        // Add timestamp directly to packet data
+        add_timestamp_to_packet(enc_pkt);
+
         // Write flushed packet to output - using interleaved write to properly handle timestamp ordering
         int write_ret = av_write_frame(output_fmt_ctx, enc_pkt);
         if (write_ret < 0) {
             std::cerr << "Error writing flushed packet to output for " << config.output_url << ": " << get_error_text(write_ret) << std::endl;
             av_packet_free(&enc_pkt);
             break;
+        }
+
+        // Create and send an empty packet after each encoded packet
+        AVPacket* empty_pkt = create_empty_packet(enc_pkt->stream_index, enc_pkt->pts);
+        if (empty_pkt) {
+            int empty_ret = av_write_frame(output_fmt_ctx, empty_pkt);
+            if (empty_ret < 0) {
+                std::cerr << "Error writing empty packet to output for " << config.output_url << ": " << get_error_text(empty_ret) << std::endl;
+                av_packet_free(&empty_pkt);
+            } else {
+                std::cout << "Sent empty packet after flush frame" << std::endl;
+            }
+            av_packet_free(&empty_pkt);
         }
 
         av_packet_free(&enc_pkt);
@@ -800,6 +841,75 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
     encode_finished = true;
     std::cout << "Encoding finished for " << config.output_url << "." << std::endl;
     return true;
+}
+
+// Add timestamp directly to packet data
+void add_timestamp_to_packet(AVPacket* pkt) {
+    int64_t timestamp = get_current_time_us();
+    
+    // Create a new packet
+    AVPacket* new_pkt = av_packet_alloc();
+    if (!new_pkt) {
+        std::cerr << "Could not allocate new packet" << std::endl;
+        return;
+    }
+    
+    // Ensure the new packet has enough buffer to hold original data plus timestamp
+    int new_size = pkt->size + sizeof(int64_t);
+    int ret = av_new_packet(new_pkt, new_size);
+    if (ret < 0) {
+        std::cerr << "Could not allocate packet data" << std::endl;
+        av_packet_free(&new_pkt);
+        return;
+    }
+    
+    // Copy original data
+    memcpy(new_pkt->data, pkt->data, pkt->size);
+    
+    // Append timestamp to the end of data
+    memcpy(new_pkt->data + pkt->size, &timestamp, sizeof(int64_t));
+    
+    // Copy other packet properties
+    new_pkt->pts = pkt->pts;
+    new_pkt->dts = pkt->dts;
+    new_pkt->stream_index = pkt->stream_index;
+    new_pkt->flags = pkt->flags;
+    new_pkt->duration = pkt->duration;
+    new_pkt->pos = pkt->pos;
+    
+    // Release original packet
+    av_packet_unref(pkt);
+    
+    // Move new packet content to original packet
+    av_packet_move_ref(pkt, new_pkt);
+    
+    // Free the new packet structure (data has been moved to original packet)
+    av_packet_free(&new_pkt);
+}
+
+AVPacket* create_empty_packet(int stream_index, int64_t pts) {
+    AVPacket* empty_pkt = av_packet_alloc();
+    if (!empty_pkt) return nullptr;
+    
+    const int PACKET_SIZE = 20;
+    int ret = av_new_packet(empty_pkt, PACKET_SIZE);
+    if (ret < 0) {
+        av_packet_free(&empty_pkt);
+        return nullptr;
+    }
+    
+    empty_pkt->stream_index = stream_index;
+    empty_pkt->pts = pts;
+    empty_pkt->dts = pts;
+    empty_pkt->flags = 0;
+    
+    empty_pkt->data[0] = 0xFF;
+    memcpy(empty_pkt->data + 1, "EMPT", 4);
+    
+    int64_t timestamp = get_current_time_us();
+    memcpy(empty_pkt->data + 5, &timestamp, sizeof(int64_t));
+    
+    return empty_pkt;
 }
 
 int main(int argc, char* argv[]) {
