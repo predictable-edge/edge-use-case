@@ -8,10 +8,10 @@ CXXFLAGS := -std=c++17 -Wall -O3 $(shell pkg-config --cflags libavformat libavco
 LDFLAGS := $(shell pkg-config --libs libavformat libavcodec libavutil libswscale)
 
 # Target Executable
-TARGET := transcoding-rtp
+TARGET := transcoding-rtsp
 
 # Source Files
-SRCS := transcoding-rtp.cpp
+SRCS := transcoding-rtsp.cpp
 
 RESULT := frame*
 
