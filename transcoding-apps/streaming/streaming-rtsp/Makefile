@@ -8,10 +8,10 @@ CXXFLAGS := -std=c++17 -Wall -O3 $(shell pkg-config --cflags libavformat libavco
 LDFLAGS := $(shell pkg-config --libs libavformat libavcodec libavutil libswscale)
 
 # Target Executable
-TARGET := streaming-rtp
+TARGET := streaming-rtsp
 
 # Source Files
-SRCS := streaming-rtp.cpp
+SRCS := streaming-rtsp.cpp
 
 RESULT := frame*
 
