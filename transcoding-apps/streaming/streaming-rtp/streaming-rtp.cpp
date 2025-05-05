@@ -250,6 +250,8 @@ void* pull_stream(void* args) {
     // av_dict_set(&options, "max_delay", "0", 0);              // Minimize buffering delay
     av_dict_set(&options, "flags", "low_delay", 0);          // Enable low delay
     av_dict_set(&options, "protocol_whitelist", "file,rtp,udp", 0);
+    // Set timeout for RTP stream
+    av_dict_set(&options, "timeout", "5000000", 0);  // 5 seconds timeout
 
     // Set input format to RTP
     std::string sdp_file = "stream.sdp";
@@ -389,7 +391,56 @@ void* pull_stream(void* args) {
     }
 
     int64_t frame_count = 0;
-    while (av_read_frame(input_fmt_ctx, packet) >= 0) {
+    int64_t last_packet_time = get_current_time_us();
+    const int64_t timeout_us = 5000000; // 5 seconds timeout
+
+    // Set timeout for read operations
+    input_fmt_ctx->interrupt_callback.callback = [](void* ctx) -> int {
+        int64_t* last_time = static_cast<int64_t*>(ctx);
+        if (get_current_time_us() - *last_time > timeout_us) {
+            return 1; // Interrupt operation
+        }
+        return 0; // Continue operation
+    };
+    input_fmt_ctx->interrupt_callback.opaque = &last_packet_time;
+
+    while (true) {
+        // Check for timeout
+        if (get_current_time_us() - last_packet_time > timeout_us) {
+            pthread_mutex_lock(&cout_mutex);
+            std::cout << "[Pull Thread " << index << "] Timeout reached - no packets received for 5 seconds. Exiting." << std::endl;
+            pthread_mutex_unlock(&cout_mutex);
+            break;
+        }
+
+        ret = av_read_frame(input_fmt_ctx, packet);
+        if (ret < 0) {
+            // Check if it's EOF or another error
+            if (ret == AVERROR_EOF) {
+                pthread_mutex_lock(&cout_mutex);
+                std::cout << "[Pull Thread " << index << "] End of stream reached." << std::endl;
+                pthread_mutex_unlock(&cout_mutex);
+                break;
+            } else if (ret == AVERROR(EAGAIN)) {
+                // Resource temporarily unavailable, continue and check timeout
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                continue;
+            } else {
+                // Some other error occurred
+                char errbuf[AV_ERROR_MAX_STRING_SIZE];
+                av_strerror(ret, errbuf, sizeof(errbuf));
+                pthread_mutex_lock(&cout_mutex);
+                std::cerr << "[Pull Thread " << index << "] Error reading frame: " << errbuf << std::endl;
+                pthread_mutex_unlock(&cout_mutex);
+                
+                // Don't exit, just try to read the next frame
+                continue;
+            }
+        }
+
+        // Update the last packet time
+        last_packet_time = get_current_time_us();
+
         if (packet->stream_index == video_stream_index) {
             int64_t pull_time_ms_before_dec = get_current_time_us() / 1000;
             int64_t pull_time_ms = get_current_time_us() / 1000;
