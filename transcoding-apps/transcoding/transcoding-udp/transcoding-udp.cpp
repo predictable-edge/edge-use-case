@@ -460,13 +460,26 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
     AVFormatContext* output_fmt_ctx = nullptr;
     AVStream* out_stream = nullptr;
 
-    // Set TCP options with increased latency and specified packet size
+    // Set UDP options
     AVDictionary* format_opts = nullptr;
+    av_dict_set(&format_opts, "buffer_size", "8192000", 0);      // Increase buffer size
+    av_dict_set(&format_opts, "pkt_size", "1316", 0);            // UDP packet size
+    av_dict_set(&format_opts, "flush_packets", "1", 0);          // Flush packets immediately
+    av_dict_set(&format_opts, "muxdelay", "0", 0);               // No muxing delay
+    av_dict_set(&format_opts, "fifo_size", "0", 0);              // No FIFO for immediate sending
 
-    if (avformat_alloc_output_context2(&output_fmt_ctx, nullptr, "rtsp", config.output_url.c_str()) < 0) {
-        std::cerr << "Could not create output context for " << config.output_url << std::endl;
-        av_dict_free(&format_opts);
-        return false;
+    // Parse output URL to ensure it's properly formatted for UDP
+    // UDP URL format: udp://ip:port
+    std::string output_url = config.output_url;
+    
+    // Create output context for UDP
+    if (avformat_alloc_output_context2(&output_fmt_ctx, nullptr, "h264", output_url.c_str()) < 0) {
+        // If h264 doesn't work, try with mpegts format which works well over UDP
+        if (avformat_alloc_output_context2(&output_fmt_ctx, nullptr, "mpegts", output_url.c_str()) < 0) {
+            std::cerr << "Could not create output context for " << output_url << std::endl;
+            av_dict_free(&format_opts);
+            return false;
+        }
     }
 
     // Find encoder for H.264
@@ -481,7 +494,7 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
     // Create new stream for encoder
     out_stream = avformat_new_stream(output_fmt_ctx, nullptr);
     if (!out_stream) {
-        std::cerr << "Failed allocating output stream for " << config.output_url << std::endl;
+        std::cerr << "Failed allocating output stream for " << output_url << std::endl;
         avformat_free_context(output_fmt_ctx);
         av_dict_free(&format_opts);
         return false;
@@ -490,7 +503,7 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
     // Allocate and configure encoder context
     AVCodecContext* encoder_ctx = avcodec_alloc_context3(encoder);
     if (!encoder_ctx) {
-        std::cerr << "Could not allocate encoder context for " << config.output_url << std::endl;
+        std::cerr << "Could not allocate encoder context for " << output_url << std::endl;
         avformat_free_context(output_fmt_ctx);
         av_dict_free(&format_opts);
         return false;
@@ -513,18 +526,16 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
     av_dict_set(&codec_opts, "preset", "ultrafast", 0);
     av_dict_set(&codec_opts, "tune", "zerolatency", 0);
     av_dict_set(&codec_opts, "delay", "0", 0);
-    av_dict_set(&codec_opts, "rtsp_transport", "udp", 0);        // Use UDP for RTP transport
-    av_dict_set(&codec_opts, "listen_timeout", "5000000", 0);    // Listen timeout 5 seconds
-    av_dict_set(&codec_opts, "max_delay", "0", 0);         
-    av_dict_set(&codec_opts, "reorder_queue_size", "0", 0);    // Reorder queue size
-    av_dict_set(&codec_opts, "fifo_size", "0", 0);
-    av_dict_set(&codec_opts, "buffer_size", "1048576", 0);       // 1MB buffer
-    av_dict_set(&codec_opts, "pkt_size", "1316", 0);             // Optimal packet size
-    av_dict_set(&codec_opts, "flush_packets", "1", 0);           // Flush packets immediately
+    
+    // UDP specific options
+    if (strstr(output_url.c_str(), "udp:") != nullptr) {
+        av_dict_set(&format_opts, "local_port", "0", 0);         // Let the OS choose a local port
+        av_dict_set(&format_opts, "ttl", "64", 0);              // Time-to-live for UDP packets
+    }
 
     // Open encoder with codec options
     if (avcodec_open2(encoder_ctx, encoder, &codec_opts) < 0) {
-        std::cerr << "Cannot open video encoder for " << config.output_url << std::endl;
+        std::cerr << "Cannot open video encoder for " << output_url << std::endl;
         avcodec_free_context(&encoder_ctx);
         avformat_free_context(output_fmt_ctx);
         av_dict_free(&codec_opts);
@@ -534,7 +545,7 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
 
     // Copy encoder parameters to output stream
     if (avcodec_parameters_from_context(out_stream->codecpar, encoder_ctx) < 0) {
-        std::cerr << "Failed to copy encoder parameters to output stream for " << config.output_url << std::endl;
+        std::cerr << "Failed to copy encoder parameters to output stream for " << output_url << std::endl;
         avcodec_free_context(&encoder_ctx);
         avformat_free_context(output_fmt_ctx);
         av_dict_free(&codec_opts);
@@ -544,10 +555,10 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
 
     out_stream->time_base = encoder_ctx->time_base;
 
-    // Open output URL with format options
+    // Open output URL with format options for UDP
     if (!(output_fmt_ctx->oformat->flags & AVFMT_NOFILE)) {
-        if (avio_open2(&output_fmt_ctx->pb, config.output_url.c_str(), AVIO_FLAG_WRITE, nullptr, &format_opts) < 0) {
-            std::cerr << "Could not open output URL: " << config.output_url << std::endl;
+        if (avio_open2(&output_fmt_ctx->pb, output_url.c_str(), AVIO_FLAG_WRITE, nullptr, &format_opts) < 0) {
+            std::cerr << "Could not open output URL: " << output_url << std::endl;
             avcodec_free_context(&encoder_ctx);
             avformat_free_context(output_fmt_ctx);
             av_dict_free(&codec_opts);
@@ -557,8 +568,8 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
     }
 
     // Write header to output
-    if (avformat_write_header(output_fmt_ctx, &codec_opts) < 0) {
-        std::cerr << "Error occurred when writing header to output: " << config.output_url << std::endl;
+    if (avformat_write_header(output_fmt_ctx, &format_opts) < 0) {
+        std::cerr << "Error occurred when writing header to output: " << output_url << std::endl;
         avcodec_free_context(&encoder_ctx);
         avformat_free_context(output_fmt_ctx);
         av_dict_free(&codec_opts);
@@ -577,7 +588,7 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
     // Allocate frame for encoder
     AVFrame* enc_frame = av_frame_alloc();
     if (!enc_frame) {
-        std::cerr << "Could not allocate encoding frame for " << config.output_url << std::endl;
+        std::cerr << "Could not allocate encoding frame for " << output_url << std::endl;
         avformat_free_context(output_fmt_ctx);
         avcodec_free_context(&encoder_ctx);
         return false;
@@ -587,7 +598,7 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
     enc_frame->height = encoder_ctx->height;
 
     if (av_frame_get_buffer(enc_frame, 32) < 0) {
-        std::cerr << "Could not allocate the video frame data for " << config.output_url << std::endl;
+        std::cerr << "Could not allocate the video frame data for " << output_url << std::endl;
         av_frame_free(&enc_frame);
         avcodec_free_context(&encoder_ctx);
         avformat_free_context(output_fmt_ctx);
@@ -629,7 +640,7 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
             );
 
             if (!sws_ctx) {
-                std::cerr << "Could not initialize the conversion context for " << config.output_url << std::endl;
+                std::cerr << "Could not initialize the conversion context for " << output_url << std::endl;
                 av_frame_free(&frame_data.frame);
                 continue;
             }
@@ -649,14 +660,14 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
         );
 
         if (converted <= 0) {
-            std::cerr << "Could not convert frame for " << config.output_url << std::endl;
+            std::cerr << "Could not convert frame for " << output_url << std::endl;
             av_frame_free(&frame_data.frame);
             continue;
         }
 
         if (first_pts == AV_NOPTS_VALUE) {
             first_pts = frame_data.frame->pts;
-            std::cout << "First encoded frame PTS for " << config.output_url << ": " << first_pts << std::endl;
+            std::cout << "First encoded frame PTS for " << output_url << ": " << first_pts << std::endl;
         }
 
         // Generate monotonically increasing PTS based on frame counter
@@ -666,7 +677,7 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
         // Send frame to encoder
         int ret = avcodec_send_frame(encoder_ctx, enc_frame);
         if (ret < 0) {
-            std::cerr << "Error sending frame to encoder for " << config.output_url << ": " << get_error_text(ret) << std::endl;
+            std::cerr << "Error sending frame to encoder for " << output_url << ": " << get_error_text(ret) << std::endl;
             av_frame_free(&frame_data.frame);
             break;
         }
@@ -675,7 +686,7 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
         while (ret >= 0) {
             AVPacket* enc_pkt = av_packet_alloc();
             if (!enc_pkt) {
-                std::cerr << "Could not allocate encoding packet for " << config.output_url << std::endl;
+                std::cerr << "Could not allocate encoding packet for " << output_url << std::endl;
                 break;
             }
 
@@ -684,7 +695,7 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
                 av_packet_free(&enc_pkt);
                 break;
             } else if (ret < 0) {
-                std::cerr << "Error during encoding for " << config.output_url << ": " << get_error_text(ret) << std::endl;
+                std::cerr << "Error during encoding for " << output_url << ": " << get_error_text(ret) << std::endl;
                 av_packet_free(&enc_pkt);
                 break;
             }
@@ -693,10 +704,10 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
             av_packet_rescale_ts(enc_pkt, encoder_ctx->time_base, out_stream->time_base);
             enc_pkt->stream_index = out_stream->index;
 
-            // Write packet to output - using interleaved write to properly handle timestamp ordering
-            int write_ret = av_write_frame(output_fmt_ctx, enc_pkt);
+            // Write packet to output
+            int write_ret = av_interleaved_write_frame(output_fmt_ctx, enc_pkt);
             if (write_ret < 0) {
-                std::cerr << "Error writing packet to output for " << config.output_url << ": " << get_error_text(write_ret) << std::endl;
+                std::cerr << "Error writing packet to output for " << output_url << ": " << get_error_text(write_ret) << std::endl;
                 av_packet_free(&enc_pkt);
                 break;
             }
@@ -716,20 +727,19 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
         logger.add_entry(frame_count, decode_time, encode_time, interval_time);
 
         if (frame_count % 100 == 0) {
-            std::cout << "Encoded " << frame_count << " frames for " << config.output_url << ", queue length: " << frame_queue.size() << std::endl;
+            std::cout << "Encoded " << frame_count << " frames for " << output_url << ", queue length: " << frame_queue.size() << std::endl;
         }
-        // std::cout << "Decoded Time: " << decode_time << std::endl;
 
         av_frame_free(&frame_data.frame);
     }
-    std::cout << "Encoded " << frame_count << " frames for " << config.output_url << ", current PTS: " << enc_frame->pts << std::endl;
+    std::cout << "Encoded " << frame_count << " frames for " << output_url << ", current PTS: " << enc_frame->pts << std::endl;
 
     // Flush encoder to ensure all frames are processed
     avcodec_send_frame(encoder_ctx, nullptr);
     while (true) {
         AVPacket* enc_pkt = av_packet_alloc();
         if (!enc_pkt) {
-            std::cerr << "Could not allocate encoding packet during flush for " << config.output_url << std::endl;
+            std::cerr << "Could not allocate encoding packet during flush for " << output_url << std::endl;
             break;
         }
 
@@ -738,7 +748,7 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
             av_packet_free(&enc_pkt);
             break;
         } else if (ret < 0) {
-            std::cerr << "Error during encoding flush for " << config.output_url << ": " << get_error_text(ret) << std::endl;
+            std::cerr << "Error during encoding flush for " << output_url << ": " << get_error_text(ret) << std::endl;
             av_packet_free(&enc_pkt);
             break;
         }
@@ -751,10 +761,10 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
         av_packet_rescale_ts(enc_pkt, encoder_ctx->time_base, out_stream->time_base);
         enc_pkt->stream_index = out_stream->index;
 
-        // Write flushed packet to output - using interleaved write to properly handle timestamp ordering
-        int write_ret = av_write_frame(output_fmt_ctx, enc_pkt);
+        // Write flushed packet to output
+        int write_ret = av_interleaved_write_frame(output_fmt_ctx, enc_pkt);
         if (write_ret < 0) {
-            std::cerr << "Error writing flushed packet to output for " << config.output_url << ": " << get_error_text(write_ret) << std::endl;
+            std::cerr << "Error writing flushed packet to output for " << output_url << ": " << get_error_text(write_ret) << std::endl;
             av_packet_free(&enc_pkt);
             break;
         }
@@ -777,7 +787,7 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
     avformat_free_context(output_fmt_ctx);
 
     encode_finished = true;
-    std::cout << "Encoding finished for " << config.output_url << "." << std::endl;
+    std::cout << "Encoding finished for " << output_url << "." << std::endl;
     return true;
 }
 
@@ -786,7 +796,7 @@ int main(int argc, char* argv[]) {
     // Maximum of 6 output URLs supported
     if (argc < 3) {
         std::cerr << "Usage: " << argv[0] 
-                  << " rtsp://192.168.2.3:9000/stream rtsp://192.168.2.2:10000/stream" 
+                  << " rtsp://192.168.2.3:9000/stream udp://192.168.2.2:10000" 
                   << std::endl;
         std::cerr << "Supported Resolutions (in order):" << std::endl;
         std::cerr << "1. 3840x2160" << std::endl;
