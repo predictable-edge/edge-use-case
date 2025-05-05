@@ -515,8 +515,9 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
     av_dict_set(&codec_opts, "delay", "0", 0);
     av_dict_set(&codec_opts, "rtsp_transport", "udp", 0);        // Use UDP for RTP transport
     av_dict_set(&codec_opts, "listen_timeout", "5000000", 0);    // Listen timeout 5 seconds
-    av_dict_set(&codec_opts, "max_delay", "500000", 0);          // Max delay 500ms
-    av_dict_set(&codec_opts, "reorder_queue_size", "10", 0);     // Reorder queue size
+    av_dict_set(&codec_opts, "max_delay", "0", 0);         
+    av_dict_set(&codec_opts, "reorder_queue_size", "0", 0);    // Reorder queue size
+    av_dict_set(&codec_opts, "fifo_size", "0", 0);
     av_dict_set(&codec_opts, "buffer_size", "1048576", 0);       // 1MB buffer
     av_dict_set(&codec_opts, "pkt_size", "1316", 0);             // Optimal packet size
     av_dict_set(&codec_opts, "flush_packets", "1", 0);           // Flush packets immediately
@@ -661,7 +662,6 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
         // Generate monotonically increasing PTS based on frame counter
         // This ensures we don't have timestamp ordering issues
         enc_frame->pts = frame_count;
-        enc_frame->pkt_dts = frame_count;
 
         // Send frame to encoder
         int ret = avcodec_send_frame(encoder_ctx, enc_frame);
@@ -688,22 +688,19 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
                 av_packet_free(&enc_pkt);
                 break;
             }
-
-            // Set packet timestamps to ensure monotonically increasing values
-            enc_pkt->pts = frame_count;
-            enc_pkt->dts = frame_count;
             
             // Rescale packet timestamp to output stream's time base
             av_packet_rescale_ts(enc_pkt, encoder_ctx->time_base, out_stream->time_base);
             enc_pkt->stream_index = out_stream->index;
 
             // Write packet to output - using interleaved write to properly handle timestamp ordering
-            int write_ret = av_interleaved_write_frame(output_fmt_ctx, enc_pkt);
+            int write_ret = av_write_frame(output_fmt_ctx, enc_pkt);
             if (write_ret < 0) {
                 std::cerr << "Error writing packet to output for " << config.output_url << ": " << get_error_text(write_ret) << std::endl;
                 av_packet_free(&enc_pkt);
                 break;
             }
+            std::cout << "Encoded frame " << frame_count + 1 << " at " << get_current_time_us() << std::endl;
 
             av_packet_free(&enc_pkt);
         }
@@ -755,7 +752,7 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
         enc_pkt->stream_index = out_stream->index;
 
         // Write flushed packet to output - using interleaved write to properly handle timestamp ordering
-        int write_ret = av_interleaved_write_frame(output_fmt_ctx, enc_pkt);
+        int write_ret = av_write_frame(output_fmt_ctx, enc_pkt);
         if (write_ret < 0) {
             std::cerr << "Error writing flushed packet to output for " << config.output_url << ": " << get_error_text(write_ret) << std::endl;
             av_packet_free(&enc_pkt);

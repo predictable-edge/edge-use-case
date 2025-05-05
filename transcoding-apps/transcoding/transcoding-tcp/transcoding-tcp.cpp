@@ -681,7 +681,7 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
                 av_packet_free(&enc_pkt);
                 break;
             }
-
+            std::cout << "Encoded frame " << frame_count + 1 << " at " << get_current_time_us() << std::endl;
             av_packet_free(&enc_pkt);
         }
 
