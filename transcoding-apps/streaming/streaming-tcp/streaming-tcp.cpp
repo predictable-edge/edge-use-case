@@ -685,6 +685,7 @@ void* pull_stream(void* args) {
             //     frame_count++;
             // }
             int64_t pull_time_ms = get_current_time_us() / 1000;
+            std::cout << "Frame " << frame_count + 1 << " pulled at " << get_current_time_us() << std::endl;
 
             // Add entry to TimingLogger
             logger.add_entry(

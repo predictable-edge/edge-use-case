@@ -246,12 +246,14 @@ void* pull_stream(void* args) {
 
     AVDictionary* options = nullptr;
     av_dict_set(&options, "rtsp_transport", "udp", 0);       // Use UDP for RTP transport
-    av_dict_set(&options, "rtsp_flags", "prefer_tcp", 0);    // Prefer TCP for RTSP control connection
-    av_dict_set(&options, "buffer_size", "8192000", 0);      // Increase buffer size
-    av_dict_set(&options, "max_delay", "500000", 0);         // 500ms max delay
-    av_dict_set(&options, "reorder_queue_size", "10", 0);    // Reorder queue size
+    av_dict_set(&options, "buffer_size", "100000", 0);      // Increase buffer size
+    av_dict_set(&options, "max_delay", "0", 0);         
+    av_dict_set(&options, "reorder_queue_size", "0", 0);    // Reorder queue size
+    av_dict_set(&options, "fifo_size", "0", 0);
     av_dict_set(&options, "stimeout", "5000000", 0);         // Socket timeout 5 seconds
     av_dict_set(&options, "listen_timeout", "5000000", 0);   // Connection timeout 5 seconds
+    av_dict_set(&options, "avioflags", "direct", 0);
+    av_dict_set(&options, "fflags", "nobuffer", 0);
 
     // Set input format to RTSP
     const AVInputFormat* input_format = av_find_input_format("rtsp");
@@ -381,6 +383,7 @@ void* pull_stream(void* args) {
         if (packet->stream_index == video_stream_index) {
             int64_t pull_time_ms_before_dec = get_current_time_us() / 1000;
             int64_t pull_time_ms = get_current_time_us() / 1000;
+            std::cout << "Frame " << frame_count + 1 << " pulled at " << get_current_time_us() << std::endl;
 
             // Add entry to TimingLogger
             logger.add_entry(
