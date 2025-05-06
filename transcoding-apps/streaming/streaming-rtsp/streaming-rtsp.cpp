@@ -253,7 +253,7 @@ void* pull_stream(void* args) {
     av_dict_set(&options, "stimeout", "5000000", 0);         // Socket timeout 5 seconds
     av_dict_set(&options, "listen_timeout", "5000000", 0);   // Connection timeout 5 seconds
     av_dict_set(&options, "avioflags", "direct", 0);
-    av_dict_set(&options, "fflags", "nobuffer", 0);
+    av_dict_set(&options, "flags", "show_all", 0);
 
     // Set input format to RTSP
     const AVInputFormat* input_format = av_find_input_format("rtsp");
@@ -393,8 +393,8 @@ void* pull_stream(void* args) {
                 push_timestamps_after_enc[frame_count],
                 pull_time_ms_before_dec
             );
-            frame_count++;
         }
+        frame_count++;
 
         av_packet_unref(packet);
     }
