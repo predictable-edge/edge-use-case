@@ -383,7 +383,9 @@ void* pull_stream(void* args) {
         if (packet->stream_index == video_stream_index) {
             int64_t pull_time_ms_before_dec = get_current_time_us() / 1000;
             int64_t pull_time_ms = get_current_time_us() / 1000;
-            std::cout << "Frame " << frame_count + 1 << " pulled at " << get_current_time_us() << std::endl;
+            if ( (frame_count + 1) % 100 == 0) {
+                std::cout << "Frame " << frame_count + 1 << " pulled at " << get_current_time_us() << std::endl;
+            }
 
             // Add entry to TimingLogger
             logger.add_entry(
@@ -583,8 +585,6 @@ void* push_stream_directly(void* args) {
                 int empty_write_ret = av_write_frame(output_fmt_ctx, empty_pkt);
                 if (empty_write_ret < 0) {
                     std::cerr << "Error writing empty packet to output" << std::endl;
-                } else {
-                    std::cout << "Empty packet sent after frame " << frame_count + 1 << std::endl;
                 }
                 av_packet_free(&empty_pkt);
             }
