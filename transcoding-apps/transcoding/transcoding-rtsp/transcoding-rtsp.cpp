@@ -455,6 +455,39 @@ bool decode_frames(DecoderInfo decoder_info, std::vector<FrameQueue*>& encoder_q
     return true;
 }
 
+AVPacket* create_timestamp_packet(const AVPacket* base ,uint64_t ts_us)
+{
+    static const uint8_t SEI_PREFIX[5] = {0,0,0,1,0x06};
+    static const uint8_t AUD_NAL[6]    = {0,0,0,1,0x09,0x10};
+
+    const int SIZE = 16 + 6;
+
+    AVPacket* pkt = av_packet_alloc();
+    if (!pkt) return nullptr;
+    if (av_packet_copy_props(pkt, base) < 0) { av_packet_free(&pkt); return nullptr; }
+
+    uint8_t* data = (uint8_t*)av_malloc(SIZE);
+    if (!data){ av_packet_free(&pkt); return nullptr; }
+    uint8_t* p = data;
+
+    memcpy(p, SEI_PREFIX, 5);  p += 5;
+    *p++ = 5;
+    *p++ = 8;
+    for (int i = 7; i >= 0; --i) *p++ = (ts_us >> (i*8)) & 0xFF;
+    *p++ = 0x80;
+
+    memcpy(p, AUD_NAL, sizeof(AUD_NAL));
+    pkt->data = data;
+    pkt->size = SIZE;
+    pkt->buf  = av_buffer_create(data, SIZE, av_buffer_default_free, nullptr, 0);
+
+    pkt->pts   = base->pts + 1;
+    pkt->dts   = base->dts + 1;
+    pkt->flags = 0;
+    pkt->stream_index = base->stream_index;
+    return pkt;
+}
+
 // Encoder Function with Initialization and Scaling
 bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRational input_time_base, std::atomic<bool>& encode_finished) {
     AVFormatContext* output_fmt_ctx = nullptr;
@@ -701,6 +734,17 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
                 break;
             }
             std::cout << "Encoded frame " << frame_count + 1 << " at " << get_current_time_us() << std::endl;
+            AVPacket* empty_pkt = create_timestamp_packet(enc_pkt, get_current_time_us());
+            if (empty_pkt) {
+                int empty_write_ret = av_write_frame(output_fmt_ctx, empty_pkt);
+                if (empty_write_ret < 0) {
+                    std::cerr << "Error writing empty packet to output: " << get_error_text(empty_write_ret) << std::endl;
+                } else {
+                    std::cout << "Empty packet sent after frame " << frame_count + 1 << std::endl;
+                }
+                av_packet_free(&empty_pkt);
+            }
+
 
             av_packet_free(&enc_pkt);
         }
@@ -712,7 +756,7 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
         double encode_time = std::chrono::duration<double, std::milli>(encode_end - encode_start).count();
         double interval_time = std::chrono::duration<double, std::milli>(encode_end - frame_data.decode_start_time).count();
 
-        frame_count++;
+        frame_count += 2;
         logger.add_entry(frame_count, decode_time, encode_time, interval_time);
 
         if (frame_count % 100 == 0) {
