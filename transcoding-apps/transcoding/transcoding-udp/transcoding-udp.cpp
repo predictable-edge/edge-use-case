@@ -525,6 +525,7 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
     AVDictionary* codec_opts = nullptr;
     av_dict_set(&codec_opts, "preset", "ultrafast", 0);
     av_dict_set(&codec_opts, "tune", "zerolatency", 0);
+    av_dict_set(&codec_opts, "fflags", "nobuffer+flush_packets", 0);
     av_dict_set(&codec_opts, "delay", "0", 0);
     
     // UDP specific options
