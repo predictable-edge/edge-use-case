@@ -733,14 +733,13 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
                 av_packet_free(&enc_pkt);
                 break;
             }
-            std::cout << "Encoded frame " << frame_count + 1 << " at " << get_current_time_us() << std::endl;
+
+            // std::cout << "Encoded frame " << frame_count + 1 << " at " << get_current_time_us() << std::endl;
             AVPacket* empty_pkt = create_timestamp_packet(enc_pkt, get_current_time_us());
             if (empty_pkt) {
                 int empty_write_ret = av_write_frame(output_fmt_ctx, empty_pkt);
                 if (empty_write_ret < 0) {
                     std::cerr << "Error writing empty packet to output: " << get_error_text(empty_write_ret) << std::endl;
-                } else {
-                    std::cout << "Empty packet sent after frame " << frame_count + 1 << std::endl;
                 }
                 av_packet_free(&empty_pkt);
             }
@@ -757,10 +756,10 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
         double interval_time = std::chrono::duration<double, std::milli>(encode_end - frame_data.decode_start_time).count();
 
         frame_count += 2;
-        logger.add_entry(frame_count, decode_time, encode_time, interval_time);
+        logger.add_entry(frame_count / 2, decode_time, encode_time, interval_time);
 
         if (frame_count % 100 == 0) {
-            std::cout << "Encoded " << frame_count << " frames for " << config.output_url << ", queue length: " << frame_queue.size() << std::endl;
+            std::cout << "Encoded " << frame_count / 2 << " frames for " << config.output_url << ", queue length: " << frame_queue.size() << std::endl;
         }
         // std::cout << "Decoded Time: " << decode_time << std::endl;
 
