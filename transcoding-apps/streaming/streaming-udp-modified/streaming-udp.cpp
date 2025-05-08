@@ -252,6 +252,8 @@ void* pull_stream(void* args) {
     av_dict_set(&options, "timeout", "5000000", 0);          // Socket timeout in microseconds
     av_dict_set(&options, "fifo_size", "0", 0);              // No FIFO buffering
     av_dict_set(&options, "overrun_nonfatal", "1", 0);       // Continue on buffer overrun
+    av_dict_set(&options, "probesize", "32768", 0);
+    av_dict_set(&options, "analyzeduration", "0", 0); 
 
     // Try to open as h264 first
     const AVInputFormat* input_format = av_find_input_format("h264");
@@ -460,7 +462,7 @@ void* push_stream_directly(void* args) {
     char *output_url = my_args[1];
 
     pthread_mutex_lock(&cout_mutex);
-    printf("[Push Thread] Starting push_stream with RTSP...\n");
+    printf("[Push Thread] Starting push_stream with UDP H264...\n");
     pthread_mutex_unlock(&cout_mutex);
 
     AVFormatContext* input_fmt_ctx = NULL;
@@ -487,7 +489,7 @@ void* push_stream_directly(void* args) {
 
     // Allocate output format context
     AVFormatContext* output_fmt_ctx = NULL;
-    ret = avformat_alloc_output_context2(&output_fmt_ctx, NULL, "rtsp", output_url);
+    ret = avformat_alloc_output_context2(&output_fmt_ctx, NULL, "h264", output_url);
     if (!output_fmt_ctx) {
         fprintf(stderr, "[Push Thread] Could not create output context.\n");
         exit(1);
@@ -507,25 +509,36 @@ void* push_stream_directly(void* args) {
     out_stream->codecpar->codec_tag = 0;
 
     // Set up UDP-specific options for low latency
-    AVDictionary* rtsp_options = NULL;
-    av_dict_set(&rtsp_options, "rtsp_transport", "udp", 0);        // Use UDP for RTP transport
-    av_dict_set(&rtsp_options, "listen_timeout", "5000000", 0);    // Listen timeout 5 seconds
-    av_dict_set(&rtsp_options, "max_delay", "500000", 0);          // Max delay 500ms
-    av_dict_set(&rtsp_options, "reorder_queue_size", "10", 0);     // Reorder queue size
-    av_dict_set(&rtsp_options, "buffer_size", "1048576", 0);       // 1MB buffer
-    av_dict_set(&rtsp_options, "pkt_size", "1316", 0);             // Optimal packet size
-    av_dict_set(&rtsp_options, "flush_packets", "1", 0);           // Flush packets immediately
+    AVDictionary* options = NULL;
+    av_dict_set(&options, "buffer_size", "8192000", 0);      // Increase buffer size
+    av_dict_set(&options, "reuse", "1", 0);                  // Allow port reuse
+    av_dict_set(&options, "max_delay", "0", 0);              // Minimize delay
+    av_dict_set(&options, "timeout", "5000000", 0);          // Socket timeout in microseconds
+    av_dict_set(&options, "fifo_size", "0", 0);              // No FIFO buffering
+    av_dict_set(&options, "pkt_size", "1316", 0);            // UDP packet size
+    av_dict_set(&options, "flush_packets", "1", 0);          // Flush packets immediately
+    av_dict_set(&options, "muxdelay", "0", 0);               // No muxing delay
 
     // Open output URL with UDP options
-    // ret = avio_open2(&output_fmt_ctx->pb, output_url, AVIO_FLAG_WRITE, NULL, &rtsp_options);
-    // CHECK_ERR(ret, "Could not open output URL");
+    ret = avio_open2(&output_fmt_ctx->pb, output_url, AVIO_FLAG_WRITE, NULL, &options);
+    if (ret < 0) {
+        char errbuf[AV_ERROR_MAX_STRING_SIZE];
+        av_strerror(ret, errbuf, sizeof(errbuf));
+        fprintf(stderr, "[Push Thread] Could not open output URL: %s\n", errbuf);
+        exit(1);
+    }
 
     // Set the maximum interleave delta to a very low value for decreased latency
     output_fmt_ctx->max_interleave_delta = 0;
 
     // Write header
-    ret = avformat_write_header(output_fmt_ctx, &rtsp_options);
-    CHECK_ERR(ret, "Error occurred when writing header to output");
+    ret = avformat_write_header(output_fmt_ctx, &options);
+    if (ret < 0) {
+        char errbuf[AV_ERROR_MAX_STRING_SIZE];
+        av_strerror(ret, errbuf, sizeof(errbuf));
+        fprintf(stderr, "[Push Thread] Error writing header: %s\n", errbuf);
+        exit(1);
+    }
 
     AVPacket* packet = av_packet_alloc();
     if (!packet) {
@@ -605,6 +618,7 @@ void* push_stream_directly(void* args) {
     }
     avformat_free_context(output_fmt_ctx);
     avformat_close_input(&input_fmt_ctx);
+    av_dict_free(&options);
 
     pthread_mutex_lock(&cout_mutex);
     printf("[Push Thread] Finished push_stream.\n");
@@ -616,7 +630,7 @@ void* push_stream_directly(void* args) {
 int main(int argc, char* argv[]) {
     if (argc < 4) {
         fprintf(stderr, "Usage: %s <push_input_file> <push_output_url> <pull_input_url1> [<pull_input_url2> ...]\n", argv[0]);
-        fprintf(stderr, "Example: %s snow-scene.mp4 \"rtsp://192.168.2.3:9000/stream\" \"udp://192.168.2.2:10000\"\n", argv[0]);
+        fprintf(stderr, "Example: %s snow-scene.mp4 \"udp://192.168.2.3:9000\" \"udp://192.168.2.2:10000\"\n", argv[0]);
         return 1;
     }
 
