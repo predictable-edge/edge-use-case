@@ -496,51 +496,338 @@ void* encode_thread_func(void* arg) {
     return NULL;
 }
 
-int extract_response_info(AVPacket *packet, ResponseInfo *response_info) {
-    uint8_t *data = packet->data;
-    int size = packet->size;
+// int extract_response_info(AVPacket *packet, ResponseInfo *response_info) {
+//     uint8_t *data = packet->data;
+//     int size = packet->size;
     
-    if (size < sizeof(ResponseInfo)) return AVERROR(EINVAL);
+//     if (size < sizeof(ResponseInfo)) return AVERROR(EINVAL);
     
-    uint32_t first_nal_size = (data[0] << 24) | (data[1] << 16) |
-                              (data[2] << 8) | data[3];
+//     uint32_t first_nal_size = (data[0] << 24) | (data[1] << 16) |
+//                               (data[2] << 8) | data[3];
 
-    if (first_nal_size + 4 > static_cast<uint32_t>(size)) return AVERROR(EINVAL);
+//     if (first_nal_size + 4 > static_cast<uint32_t>(size)) return AVERROR(EINVAL);
 
-    if (data[4] != 0x06) {
-        return AVERROR(EINVAL);
+//     if (data[4] != 0x06) {
+//         return AVERROR(EINVAL);
+//     }
+    
+//     int sei_offset = 5;
+    
+//     if (data[sei_offset] != 0x05) return AVERROR(EINVAL);
+//     sei_offset += 2;
+    
+//     const uint8_t expected_uuid[16] = {
+//         0x54, 0x69, 0x6D, 0x65, // "Time"
+//         0x53, 0x74, 0x61, 0x6D, // "Stam"
+//         0x70, 0x00, 0x01, 0x02, 
+//         0x03, 0x04, 0x05, 0x06 
+//     };
+    
+//     if (memcmp(data + sei_offset, expected_uuid, 16) != 0) {
+//         return AVERROR(EINVAL);
+//     }
+//     sei_offset += 16;
+    
+//     memcpy(response_info, data + sei_offset, sizeof(ResponseInfo));
+    
+//     int original_size = size - (4 + first_nal_size);
+//     uint8_t *restored_data = (uint8_t*)av_malloc(original_size);
+//     if (!restored_data) return AVERROR(ENOMEM);
+    
+//     memcpy(restored_data, data + 4 + first_nal_size, original_size);
+    
+//     av_buffer_unref(&packet->buf);
+//     packet->buf = av_buffer_create(restored_data, original_size, 
+//                                   av_buffer_default_free, NULL, 0);
+//     packet->data = restored_data;
+//     packet->size = original_size;
+    
+//     return 0;
+// }
+
+// // Modified pull_stream function to handle multiple pull URLs and logging
+// void* pull_stream(void* args) {
+//     PullArgs* pull_args = static_cast<PullArgs*>(args);
+//     char* input_url = pull_args->input_url;
+//     int index = pull_args->index;
+//     int num_pull = pull_args->num_pull;
+
+//     // Create a TimingLogger instance for this pull thread
+//     std::stringstream ss;
+//     ss <<  "result/task" << num_pull << "/" << get_timestamp_with_ms() << "/"
+//        << "frame-" << index << ".log"; 
+//     std::string log_filename = ss.str();
+//     TimingLogger logger(log_filename);
+
+//     pthread_mutex_lock(&cout_mutex);
+//     std::cout << "[Pull Thread " << index << "] Starting pull_stream..." << std::endl;
+//     pthread_mutex_unlock(&cout_mutex);
+
+//     avformat_network_init();
+
+//     AVFormatContext* input_fmt_ctx = nullptr;
+//     int ret = 0;
+
+//     AVDictionary* options = nullptr;
+//     av_dict_set(&options, "probesize",       "327680",    0);
+//     av_dict_set(&options, "analyzeduration", "0",        0); 
+//     ret = avformat_open_input(&input_fmt_ctx, input_url, nullptr, &options);
+//     if (ret < 0) {
+//         pthread_mutex_lock(&cout_mutex);
+//         char errbuf[AV_ERROR_MAX_STRING_SIZE];
+//         av_strerror(ret, errbuf, sizeof(errbuf));
+//         std::cerr << "[Pull Thread " << index << "] Could not open input: " << errbuf << std::endl;
+//         pthread_mutex_unlock(&cout_mutex);
+
+//         av_dict_free(&options);
+//         avformat_network_deinit();
+//         return nullptr;
+//     }
+
+//     ret = avformat_find_stream_info(input_fmt_ctx, nullptr);
+//     if (ret < 0) {
+//         pthread_mutex_lock(&cout_mutex);
+//         char errbuf[AV_ERROR_MAX_STRING_SIZE];
+//         av_strerror(ret, errbuf, sizeof(errbuf));
+//         std::cerr << "[Pull Thread " << index << "] Failed to retrieve input stream information: " << errbuf << std::endl;
+//         pthread_mutex_unlock(&cout_mutex);
+//         avformat_close_input(&input_fmt_ctx);
+//         av_dict_free(&options);
+//         avformat_network_deinit();
+//         return nullptr;
+//     }
+
+//     int video_stream_index = -1;
+//     for (unsigned int i = 0; i < input_fmt_ctx->nb_streams; i++) {
+//         AVStream* in_stream = input_fmt_ctx->streams[i];
+//         if (in_stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+//             video_stream_index = i;
+//             break;
+//         }
+//     }
+
+//     if (video_stream_index == -1) {
+//         pthread_mutex_lock(&cout_mutex);
+//         std::cerr << "[Pull Thread " << index << "] No video stream found" << std::endl;
+//         pthread_mutex_unlock(&cout_mutex);
+//         avformat_close_input(&input_fmt_ctx);
+//         av_dict_free(&options);
+//         avformat_network_deinit();
+//         return nullptr;
+//     }
+
+//     AVCodecParameters* codecpar = input_fmt_ctx->streams[video_stream_index]->codecpar;
+//     const AVCodec* codec = avcodec_find_decoder(codecpar->codec_id);
+//     if (!codec) {
+//         pthread_mutex_lock(&cout_mutex);
+//         std::cerr << "[Pull Thread " << index << "] Could not find the decoder" << std::endl;
+//         pthread_mutex_unlock(&cout_mutex);
+//         avformat_close_input(&input_fmt_ctx);
+//         av_dict_free(&options);
+//         avformat_network_deinit();
+//         return nullptr;
+//     }
+
+//     AVCodecContext* codec_ctx = avcodec_alloc_context3(codec);
+//     if (!codec_ctx) {
+//         pthread_mutex_lock(&cout_mutex);
+//         std::cerr << "[Pull Thread " << index << "] Could not allocate codec context" << std::endl;
+//         pthread_mutex_unlock(&cout_mutex);
+//         avformat_close_input(&input_fmt_ctx);
+//         av_dict_free(&options);
+//         avformat_network_deinit();
+//         return nullptr;
+//     }
+
+//     ret = avcodec_parameters_to_context(codec_ctx, codecpar);
+//     if (ret < 0) {
+//         pthread_mutex_lock(&cout_mutex);
+//         std::cerr << "[Pull Thread " << index << "] Failed to copy codec parameters to codec context" << std::endl;
+//         pthread_mutex_unlock(&cout_mutex);
+//         avcodec_free_context(&codec_ctx);
+//         avformat_close_input(&input_fmt_ctx);
+//         av_dict_free(&options);
+//         avformat_network_deinit();
+//         return nullptr;
+//     }
+//     // codec_ctx->thread_count = 1;
+//     codec_ctx->flags |= AV_CODEC_FLAG_LOW_DELAY;
+//     // codec_ctx->thread_count = 0;
+//     // codec_ctx->flags2 |= AV_CODEC_FLAG2_FAST;
+
+//     ret = avcodec_open2(codec_ctx, codec, nullptr);
+//     if (ret < 0) {
+//         pthread_mutex_lock(&cout_mutex);
+//         std::cerr << "[Pull Thread " << index << "] Could not open codec" << std::endl;
+//         pthread_mutex_unlock(&cout_mutex);
+//         avcodec_free_context(&codec_ctx);
+//         avformat_close_input(&input_fmt_ctx);
+//         av_dict_free(&options);
+//         avformat_network_deinit();
+//         return nullptr;
+//     }
+
+//     AVFrame* frame = av_frame_alloc();
+//     if (!frame) {
+//         pthread_mutex_lock(&cout_mutex);
+//         std::cerr << "[Pull Thread " << index << "] Could not allocate frame" << std::endl;
+//         pthread_mutex_unlock(&cout_mutex);
+//         avcodec_free_context(&codec_ctx);
+//         avformat_close_input(&input_fmt_ctx);
+//         av_dict_free(&options);
+//         avformat_network_deinit();
+//         return nullptr;
+//     }
+
+//     AVPacket* packet = av_packet_alloc();
+//     if (!packet) {
+//         pthread_mutex_lock(&cout_mutex);
+//         std::cerr << "[Pull Thread " << index << "] Could not allocate packet" << std::endl;
+//         pthread_mutex_unlock(&cout_mutex);
+//         av_frame_free(&frame);
+//         avcodec_free_context(&codec_ctx);
+//         avformat_close_input(&input_fmt_ctx);
+//         av_dict_free(&options);
+//         avformat_network_deinit();
+//         return nullptr;
+//     }
+
+//     int64_t frame_count = 0;
+//     while (av_read_frame(input_fmt_ctx, packet) >= 0) {
+//         ResponseInfo response_info;
+//         int ret = extract_response_info(packet, &response_info);
+//         if (ret < 0) {
+//             std::cerr << "[Pull Thread " << index << "] Failed to extract response info" << std::endl;
+//             continue;
+//         }
+//         reportResponse(response_info);
+//         std::cout << "response id: " << response_info.response_id << " response size: " << packet->size << std::endl;
+//         if (packet->stream_index == video_stream_index) {
+//             int64_t pull_time_ms_before_dec = get_current_time_us() / 1000;
+//             // std::cout << packet->pts << ": " << get_timestamp_with_ms() << std::endl;
+
+//             // ret = avcodec_send_packet(codec_ctx, packet);
+//             // if (ret < 0) {
+//             //     pthread_mutex_lock(&cout_mutex);
+//             //     char errbuf[AV_ERROR_MAX_STRING_SIZE];
+//             //     av_strerror(ret, errbuf, sizeof(errbuf));
+//             //     std::cerr << "[Pull Thread " << index << "] Error sending packet for decoding: " << errbuf << std::endl;
+//             //     pthread_mutex_unlock(&cout_mutex);
+//             //     av_packet_unref(packet);
+//             //     continue;
+//             // }
+
+//             // while (ret >= 0) {
+//             //     ret = avcodec_receive_frame(codec_ctx, frame);
+//             //     if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
+//             //         break;
+//             //     } else if (ret < 0) {
+//             //         pthread_mutex_lock(&cout_mutex);
+//             //         char errbuf[AV_ERROR_MAX_STRING_SIZE];
+//             //         av_strerror(ret, errbuf, sizeof(errbuf));
+//             //         std::cerr << "[Pull Thread " << index << "] Error during decoding: " << errbuf << std::endl;
+//             //         pthread_mutex_unlock(&cout_mutex);
+//             //         break;
+//             //     }
+
+//             //     int64_t pull_time_ms = get_current_time_us() / 1000;
+
+//             //     // Add entry to TimingLogger
+//             //     logger.add_entry(
+//             //         static_cast<int>(frame_count + 1),
+//             //         push_timestamps[frame_count],
+//             //         pull_time_ms,
+//             //         push_timestamps_after_enc[frame_count],
+//             //         pull_time_ms_before_dec
+//             //     );
+
+//             //     frame_count++;
+//             // }
+//             int64_t pull_time_ms = get_current_time_us() / 1000;
+
+//             // Add entry to TimingLogger
+//             logger.add_entry(
+//                 static_cast<int>(frame_count + 1),
+//                 push_timestamps[frame_count],
+//                 pull_time_ms,
+//                 push_timestamps_after_enc[frame_count],
+//                 pull_time_ms_before_dec
+//             );
+//             frame_count++;
+//         }
+
+//         av_packet_unref(packet);
+//     }
+
+//     // avcodec_send_packet(codec_ctx, NULL);
+//     // while (avcodec_receive_frame(codec_ctx, frame) == 0) {
+//     //     frame_count++;
+//     // }
+
+//     // Write the log to file
+//     logger.write_to_file();
+
+//     av_packet_free(&packet);
+//     av_frame_free(&frame);
+//     avcodec_free_context(&codec_ctx);
+//     avformat_close_input(&input_fmt_ctx);
+//     av_dict_free(&options);
+//     avformat_network_deinit();
+
+//     pthread_mutex_lock(&cout_mutex);
+//     std::cout << "[Pull Thread " << index << "] Finished pull_stream." << std::endl;
+//     pthread_mutex_unlock(&cout_mutex);
+
+//     return nullptr;
+// }
+
+int extract_response_info(AVPacket* pkt, ResponseInfo* response_info) {
+    // Check if packet is large enough to contain ResponseInfo
+    if (pkt->size <= static_cast<int>(sizeof(ResponseInfo))) {
+        std::cerr << "Packet is too small to contain response info" << std::endl;
+        return -1;
     }
     
-    int sei_offset = 5;
+    // Calculate the original data size
+    int original_size = pkt->size - static_cast<int>(sizeof(ResponseInfo));
     
-    if (data[sei_offset] != 0x05) return AVERROR(EINVAL);
-    sei_offset += 2;
+    // Extract the ResponseInfo from the end of the packet
+    memcpy(response_info, pkt->data + original_size, sizeof(ResponseInfo));
     
-    const uint8_t expected_uuid[16] = {
-        0x54, 0x69, 0x6D, 0x65, // "Time"
-        0x53, 0x74, 0x61, 0x6D, // "Stam"
-        0x70, 0x00, 0x01, 0x02, 
-        0x03, 0x04, 0x05, 0x06 
-    };
-    
-    if (memcmp(data + sei_offset, expected_uuid, 16) != 0) {
-        return AVERROR(EINVAL);
+    // Create a new packet for the original data
+    AVPacket* new_pkt = av_packet_alloc();
+    if (!new_pkt) {
+        std::cerr << "Could not allocate new packet" << std::endl;
+        return -1;
     }
-    sei_offset += 16;
     
-    memcpy(response_info, data + sei_offset, sizeof(ResponseInfo));
+    // Allocate memory for the original data
+    int ret = av_new_packet(new_pkt, original_size);
+    if (ret < 0) {
+        std::cerr << "Could not allocate packet data" << std::endl;
+        av_packet_free(&new_pkt);
+        return -1;
+    }
     
-    int original_size = size - (4 + first_nal_size);
-    uint8_t *restored_data = (uint8_t*)av_malloc(original_size);
-    if (!restored_data) return AVERROR(ENOMEM);
+    // Copy only the original data (excluding the ResponseInfo)
+    memcpy(new_pkt->data, pkt->data, original_size);
     
-    memcpy(restored_data, data + 4 + first_nal_size, original_size);
+    // Copy other packet properties
+    new_pkt->pts = pkt->pts;
+    new_pkt->dts = pkt->dts;
+    new_pkt->stream_index = pkt->stream_index;
+    new_pkt->flags = pkt->flags;
+    new_pkt->duration = pkt->duration;
+    new_pkt->pos = pkt->pos;
     
-    av_buffer_unref(&packet->buf);
-    packet->buf = av_buffer_create(restored_data, original_size, 
-                                  av_buffer_default_free, NULL, 0);
-    packet->data = restored_data;
-    packet->size = original_size;
+    // Release original packet
+    av_packet_unref(pkt);
+    
+    // Move new packet content to original packet
+    av_packet_move_ref(pkt, new_pkt);
+    
+    // Free the new packet structure (data has been moved to original packet)
+    av_packet_free(&new_pkt);
     
     return 0;
 }
@@ -560,7 +847,7 @@ void* pull_stream(void* args) {
     TimingLogger logger(log_filename);
 
     pthread_mutex_lock(&cout_mutex);
-    std::cout << "[Pull Thread " << index << "] Starting pull_stream..." << std::endl;
+    std::cout << "[Pull Thread " << index << "] Starting pull_stream with UDP H264..." << std::endl;
     pthread_mutex_unlock(&cout_mutex);
 
     avformat_network_init();
@@ -569,9 +856,40 @@ void* pull_stream(void* args) {
     int ret = 0;
 
     AVDictionary* options = nullptr;
-    av_dict_set(&options, "probesize",       "327680",    0);
-    av_dict_set(&options, "analyzeduration", "0",        0); 
-    ret = avformat_open_input(&input_fmt_ctx, input_url, nullptr, &options);
+    // Configure UDP-specific options for low latency
+    av_dict_set(&options, "buffer_size", "8192000", 0);      // Increase buffer size
+    av_dict_set(&options, "reuse", "1", 0);                  // Allow port reuse
+    av_dict_set(&options, "max_delay", "0", 0);              // Minimize delay
+    av_dict_set(&options, "timeout", "5000000", 0);          // Socket timeout in microseconds
+    av_dict_set(&options, "fifo_size", "0", 0);              // No FIFO buffering
+    av_dict_set(&options, "overrun_nonfatal", "1", 0);       // Continue on buffer overrun
+    av_dict_set(&options, "probesize", "32768", 0);
+    av_dict_set(&options, "analyzeduration", "0", 0); 
+
+    // Try to open as h264 first
+    const AVInputFormat* input_format = av_find_input_format("h264");
+    ret = avformat_open_input(&input_fmt_ctx, input_url, input_format, &options);
+    
+    // If h264 format fails, try with mpegts
+    if (ret < 0) {
+        pthread_mutex_lock(&cout_mutex);
+        std::cout << "[Pull Thread " << index << "] H264 format failed, trying mpegts..." << std::endl;
+        pthread_mutex_unlock(&cout_mutex);
+        
+        av_dict_free(&options);
+        options = nullptr;
+        
+        // Reinitialize options for mpegts
+        av_dict_set(&options, "buffer_size", "8192000", 0);
+        av_dict_set(&options, "reuse", "1", 0);
+        av_dict_set(&options, "max_delay", "0", 0);
+        av_dict_set(&options, "timeout", "5000000", 0);
+        av_dict_set(&options, "fifo_size", "0", 0);
+        
+        input_format = av_find_input_format("mpegts");
+        ret = avformat_open_input(&input_fmt_ctx, input_url, input_format, &options);
+    }
+
     if (ret < 0) {
         pthread_mutex_lock(&cout_mutex);
         char errbuf[AV_ERROR_MAX_STRING_SIZE];
@@ -650,12 +968,17 @@ void* pull_stream(void* args) {
         avformat_network_deinit();
         return nullptr;
     }
-    // codec_ctx->thread_count = 1;
+    
+    // Set low-latency decoding options
     codec_ctx->flags |= AV_CODEC_FLAG_LOW_DELAY;
-    // codec_ctx->thread_count = 0;
-    // codec_ctx->flags2 |= AV_CODEC_FLAG2_FAST;
+    codec_ctx->flags2 |= AV_CODEC_FLAG2_FAST;
+    
+    // Speed up decoding
+    AVDictionary* codec_options = nullptr;
+    av_dict_set(&codec_options, "threads", "1", 0);   // Use single thread for lower latency
+    av_dict_set(&codec_options, "strict", "-2", 0);    // Less strict decoding compliance
 
-    ret = avcodec_open2(codec_ctx, codec, nullptr);
+    ret = avcodec_open2(codec_ctx, codec, &codec_options);
     if (ret < 0) {
         pthread_mutex_lock(&cout_mutex);
         std::cerr << "[Pull Thread " << index << "] Could not open codec" << std::endl;
@@ -663,6 +986,7 @@ void* pull_stream(void* args) {
         avcodec_free_context(&codec_ctx);
         avformat_close_input(&input_fmt_ctx);
         av_dict_free(&options);
+        av_dict_free(&codec_options);
         avformat_network_deinit();
         return nullptr;
     }
@@ -675,6 +999,7 @@ void* pull_stream(void* args) {
         avcodec_free_context(&codec_ctx);
         avformat_close_input(&input_fmt_ctx);
         av_dict_free(&options);
+        av_dict_free(&codec_options);
         avformat_network_deinit();
         return nullptr;
     }
@@ -688,9 +1013,14 @@ void* pull_stream(void* args) {
         avcodec_free_context(&codec_ctx);
         avformat_close_input(&input_fmt_ctx);
         av_dict_free(&options);
+        av_dict_free(&codec_options);
         avformat_network_deinit();
         return nullptr;
     }
+
+    pthread_mutex_lock(&cout_mutex);
+    std::cout << "[Pull Thread " << index << "] Started receiving H264 stream over UDP" << std::endl;
+    pthread_mutex_unlock(&cout_mutex);
 
     int64_t frame_count = 0;
     while (av_read_frame(input_fmt_ctx, packet) >= 0) {
@@ -701,49 +1031,15 @@ void* pull_stream(void* args) {
             continue;
         }
         reportResponse(response_info);
-        std::cout << "response id: " << response_info.response_id << " response size: " << packet->size << std::endl;
         if (packet->stream_index == video_stream_index) {
             int64_t pull_time_ms_before_dec = get_current_time_us() / 1000;
-            // std::cout << packet->pts << ": " << get_timestamp_with_ms() << std::endl;
-
-            // ret = avcodec_send_packet(codec_ctx, packet);
-            // if (ret < 0) {
-            //     pthread_mutex_lock(&cout_mutex);
-            //     char errbuf[AV_ERROR_MAX_STRING_SIZE];
-            //     av_strerror(ret, errbuf, sizeof(errbuf));
-            //     std::cerr << "[Pull Thread " << index << "] Error sending packet for decoding: " << errbuf << std::endl;
-            //     pthread_mutex_unlock(&cout_mutex);
-            //     av_packet_unref(packet);
-            //     continue;
-            // }
-
-            // while (ret >= 0) {
-            //     ret = avcodec_receive_frame(codec_ctx, frame);
-            //     if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
-            //         break;
-            //     } else if (ret < 0) {
-            //         pthread_mutex_lock(&cout_mutex);
-            //         char errbuf[AV_ERROR_MAX_STRING_SIZE];
-            //         av_strerror(ret, errbuf, sizeof(errbuf));
-            //         std::cerr << "[Pull Thread " << index << "] Error during decoding: " << errbuf << std::endl;
-            //         pthread_mutex_unlock(&cout_mutex);
-            //         break;
-            //     }
-
-            //     int64_t pull_time_ms = get_current_time_us() / 1000;
-
-            //     // Add entry to TimingLogger
-            //     logger.add_entry(
-            //         static_cast<int>(frame_count + 1),
-            //         push_timestamps[frame_count],
-            //         pull_time_ms,
-            //         push_timestamps_after_enc[frame_count],
-            //         pull_time_ms_before_dec
-            //     );
-
-            //     frame_count++;
-            // }
+            
+            // Process the packet for logging (we don't need to decode for this example)
             int64_t pull_time_ms = get_current_time_us() / 1000;
+            
+            pthread_mutex_lock(&cout_mutex);
+            std::cout << "Frame " << frame_count + 1 << " received at " << get_current_time_us() << std::endl;
+            pthread_mutex_unlock(&cout_mutex);
 
             // Add entry to TimingLogger
             logger.add_entry(
@@ -759,27 +1055,25 @@ void* pull_stream(void* args) {
         av_packet_unref(packet);
     }
 
-    // avcodec_send_packet(codec_ctx, NULL);
-    // while (avcodec_receive_frame(codec_ctx, frame) == 0) {
-    //     frame_count++;
-    // }
-
     // Write the log to file
     logger.write_to_file();
 
+    // Clean up resources
     av_packet_free(&packet);
     av_frame_free(&frame);
     avcodec_free_context(&codec_ctx);
     avformat_close_input(&input_fmt_ctx);
     av_dict_free(&options);
+    av_dict_free(&codec_options);
     avformat_network_deinit();
 
     pthread_mutex_lock(&cout_mutex);
-    std::cout << "[Pull Thread " << index << "] Finished pull_stream." << std::endl;
+    std::cout << "[Pull Thread " << index << "] Finished pull_stream. Processed " << frame_count << " frames." << std::endl;
     pthread_mutex_unlock(&cout_mutex);
 
     return nullptr;
 }
+
 
 int embed_timestamp(AVPacket *packet) {
     uint64_t timestamp = get_current_time_us();
@@ -1170,7 +1464,7 @@ void* push_stream(void* args) {
 int main(int argc, char* argv[]) {
     if (argc < 4) {
         fprintf(stderr, "Usage: %s <push_input_file> <push_output_url> <pull_input_url1> [<pull_input_url2> ...]\n", argv[0]);
-        fprintf(stderr, "Example: %s snow-scene.mp4 \"tcp://192.168.2.3:9000\" \"tcp://192.168.2.2:10000?listen=1\" \"tcp://192.168.2.2:10001?listen=1\"\n", argv[0]);
+        fprintf(stderr, "Example: %s snow-scene.mp4 \"tcp://192.168.2.3:9000\" \"udp://192.168.2.2:10000\"\n", argv[0]);
         return 1;
     }
 
