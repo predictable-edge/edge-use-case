@@ -1024,24 +1024,32 @@ void* pull_stream(void* args) {
 
     int64_t frame_count = 0;
     while (av_read_frame(input_fmt_ctx, packet) >= 0) {
-        ResponseInfo response_info;
-        int ret = extract_response_info(packet, &response_info);
-        if (ret < 0) {
-            std::cerr << "[Pull Thread " << index << "] Failed to extract response info" << std::endl;
-            continue;
-        }
-        std::cout << "Frame " << frame_count + 1 << " received at " << get_current_time_us() - response_info.send_timestamp << "us" << std::endl;
-        reportResponse(response_info);
         if (packet->stream_index == video_stream_index) {
             int64_t pull_time_ms_before_dec = get_current_time_us() / 1000;
             
             // Process the packet for logging (we don't need to decode for this example)
             int64_t pull_time_ms = get_current_time_us() / 1000;
             
-            if (frame_count % 100 == 0) {
-                pthread_mutex_lock(&cout_mutex);
-                std::cout << "Frame " << frame_count + 1 << " received at " << get_current_time_us() << std::endl;
-                pthread_mutex_unlock(&cout_mutex);
+            // if (frame_count % 100 == 0) {
+            //     pthread_mutex_lock(&cout_mutex);
+            //     std::cout << "Frame " << frame_count + 1 << " received at " << get_current_time_us() << std::endl;
+            //     pthread_mutex_unlock(&cout_mutex);
+            // }
+            ResponseInfo response_info;
+            response_info.send_timestamp = 0;
+            int ret = extract_response_info(packet, &response_info);
+            if (ret < 0) {
+                std::cerr << "[Pull Thread " << index << "] Failed to extract response info" << std::endl;
+                continue;
+            }
+            if (response_info.send_timestamp != 0) {
+                std::cout << "Frame " << frame_count + 1 << " received at " << get_current_time_us() - response_info.send_timestamp << "us" << std::endl;
+                if (get_current_time_us() - response_info.send_timestamp < 100000) {
+                    reportResponse(response_info);
+                } else {
+                    std::cerr << "Frame " << frame_count + 1 << " has suspiciously high latency: " 
+                              << get_current_time_us() - response_info.send_timestamp << "us" << std::endl;
+                }
             }
 
             // Add entry to TimingLogger
