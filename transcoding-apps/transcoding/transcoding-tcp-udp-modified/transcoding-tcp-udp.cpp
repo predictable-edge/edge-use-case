@@ -372,6 +372,55 @@ uint64_t extract_timestamp(AVPacket *packet) {
     return timestamp;
 }
 
+bool extract_request_header(AVPacket *packet, RequestHeader &header) {
+    uint8_t *data = packet->data;
+    int size = packet->size;
+    
+    if (size < 8) return false;
+    
+    uint32_t first_nal_size = (data[0] << 24) | (data[1] << 16) |
+                              (data[2] << 8) | data[3];
+
+    if (first_nal_size + 4 > static_cast<uint32_t>(size)) return false;
+
+    if (data[4] != 0x06) {
+        return false;
+    }
+    
+    int sei_offset = 5;
+    
+    if (data[sei_offset] != 0x05) return false;
+    sei_offset += 2;
+    
+    const uint8_t expected_uuid[16] = {
+        0x54, 0x69, 0x6D, 0x65, // "Time"
+        0x53, 0x74, 0x61, 0x6D, // "Stam"
+        0x70, 0x00, 0x01, 0x02, 
+        0x03, 0x04, 0x05, 0x06 
+    };
+    
+    if (memcmp(data + sei_offset, expected_uuid, 16) != 0) {
+        return false;
+    }
+    sei_offset += 16;
+    
+    memcpy(&header, data + sei_offset, sizeof(RequestHeader));
+    
+    int original_size = size - (4 + first_nal_size);
+    uint8_t *restored_data = (uint8_t*)av_malloc(original_size);
+    if (!restored_data) return false;
+    
+    memcpy(restored_data, data + 4 + first_nal_size, original_size);
+    
+    av_buffer_unref(&packet->buf);
+    packet->buf = av_buffer_create(restored_data, original_size, 
+                                  av_buffer_default_free, NULL, 0);
+    packet->data = restored_data;
+    packet->size = original_size;
+    
+    return true;
+}
+
 // Decoder Function
 void packet_reading_thread(AVFormatContext* input_fmt_ctx, int video_stream_idx, PacketQueue& packet_queue) {
     AVPacket* packet = av_packet_alloc();
@@ -388,11 +437,12 @@ void packet_reading_thread(AVFormatContext* input_fmt_ctx, int video_stream_idx,
             std::cerr << "Error reading frame: " << get_error_text(ret) << std::endl;
             break;
         }
-        uint64_t timestamp = extract_timestamp(packet);
-        uint32_t net_ip  = inet_addr("10.45.0.2");
-        uint32_t host_ip = ntohl(net_ip);
-        reportRequest(host_ip, request_count++, timestamp);
+        // uint64_t timestamp = extract_timestamp(packet);
+        RequestHeader header;
+        extract_request_header(packet, header);
+        reportRequest(header.client_key, request_count++, header.send_timestamp);
         if (packet->stream_index == video_stream_idx) {
+            // std::cout << "Frame " << request_count - 1 << " at " << get_current_time_us() - header.send_timestamp << " us" << std::endl;
             packet_queue.push(packet);
             packet = av_packet_alloc();
             if (!packet) {
@@ -502,47 +552,47 @@ bool decode_frames(DecoderInfo decoder_info, std::vector<FrameQueue*>& encoder_q
     return true;
 }
 
-int embed_response_header(AVPacket *packet, const ResponseInfo& response_info) {
-    uint8_t sei_content[48];
-    int sei_content_size = 0;
+// int embed_response_header(AVPacket *packet, const ResponseInfo& response_info) {
+//     uint8_t sei_content[48];
+//     int sei_content_size = 0;
     
-    sei_content[sei_content_size++] = 0x06;
-    sei_content[sei_content_size++] = 0x05;
-    int payload_size = 16 + sizeof(ResponseInfo);
-    sei_content[sei_content_size++] = payload_size;
+//     sei_content[sei_content_size++] = 0x06;
+//     sei_content[sei_content_size++] = 0x05;
+//     int payload_size = 16 + sizeof(ResponseInfo);
+//     sei_content[sei_content_size++] = payload_size;
     
-    const uint8_t uuid[16] = {
-        0x54, 0x69, 0x6D, 0x65, // "Time"
-        0x53, 0x74, 0x61, 0x6D, // "Stam"
-        0x70, 0x00, 0x01, 0x02, 
-        0x03, 0x04, 0x05, 0x06 
-    };
-    memcpy(sei_content + sei_content_size, uuid, 16);
-    sei_content_size += 16;
+//     const uint8_t uuid[16] = {
+//         0x54, 0x69, 0x6D, 0x65, // "Time"
+//         0x53, 0x74, 0x61, 0x6D, // "Stam"
+//         0x70, 0x00, 0x01, 0x02, 
+//         0x03, 0x04, 0x05, 0x06 
+//     };
+//     memcpy(sei_content + sei_content_size, uuid, 16);
+//     sei_content_size += 16;
     
-    memcpy(sei_content + sei_content_size, &response_info, sizeof(ResponseInfo));
-    sei_content_size += sizeof(ResponseInfo);
-    sei_content[sei_content_size++] = 0x80;
+//     memcpy(sei_content + sei_content_size, &response_info, sizeof(ResponseInfo));
+//     sei_content_size += sizeof(ResponseInfo);
+//     sei_content[sei_content_size++] = 0x80;
     
-    int new_size = packet->size + sei_content_size + 4;
-    uint8_t *new_data = (uint8_t*)av_malloc(new_size);
-    if (!new_data) return AVERROR(ENOMEM);
+//     int new_size = packet->size + sei_content_size + 4;
+//     uint8_t *new_data = (uint8_t*)av_malloc(new_size);
+//     if (!new_data) return AVERROR(ENOMEM);
     
-    new_data[0] = (sei_content_size >> 24) & 0xFF;
-    new_data[1] = (sei_content_size >> 16) & 0xFF;
-    new_data[2] = (sei_content_size >> 8) & 0xFF;
-    new_data[3] = sei_content_size & 0xFF;
+//     new_data[0] = (sei_content_size >> 24) & 0xFF;
+//     new_data[1] = (sei_content_size >> 16) & 0xFF;
+//     new_data[2] = (sei_content_size >> 8) & 0xFF;
+//     new_data[3] = sei_content_size & 0xFF;
     
-    memcpy(new_data + 4, sei_content, sei_content_size);
+//     memcpy(new_data + 4, sei_content, sei_content_size);
 
-    memcpy(new_data + 4 + sei_content_size, packet->data, packet->size);
-    av_buffer_unref(&packet->buf);
-    packet->buf = av_buffer_create(new_data, new_size, 
-                                  av_buffer_default_free, NULL, 0);
-    packet->data = new_data;
-    packet->size = new_size;
-    return 0;
-}
+//     memcpy(new_data + 4 + sei_content_size, packet->data, packet->size);
+//     av_buffer_unref(&packet->buf);
+//     packet->buf = av_buffer_create(new_data, new_size, 
+//                                   av_buffer_default_free, NULL, 0);
+//     packet->data = new_data;
+//     packet->size = new_size;
+//     return 0;
+// }
 
 // Encoder Function with Initialization and Scaling
 // bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRational input_time_base, std::atomic<bool>& encode_finished) {
@@ -1094,7 +1144,7 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
 
     // Initialize TimingLogger
     TimingLogger logger(config.log_filename);
-
+    uint32_t response_id = 0;
     // Read frames from queue, encode, and write to output
     while (true) {
         FrameData frame_data;
@@ -1186,6 +1236,9 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
             // Rescale packet timestamp to output stream's time base
             av_packet_rescale_ts(enc_pkt, encoder_ctx->time_base, out_stream->time_base);
             enc_pkt->stream_index = out_stream->index;
+            // Write packet to output
+            ResponseInfo response_info = getResponseHeader(response_id++);
+            add_response_info_to_packet(enc_pkt, response_info);
 
             // Write packet to output
             int write_ret = av_interleaved_write_frame(output_fmt_ctx, enc_pkt);
@@ -1216,7 +1269,7 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
         double interval_time = std::chrono::duration<double, std::milli>(encode_end - frame_data.decode_start_time).count();
 
         frame_count += 2;
-        logger.add_entry(frame_count, decode_time, encode_time, interval_time);
+        logger.add_entry(frame_count / 2, decode_time, encode_time, interval_time);
 
         if (frame_count % 100 == 0) {
             std::cout << "Encoded " << frame_count << " frames for " << output_url << ", queue length: " << frame_queue.size() << std::endl;
