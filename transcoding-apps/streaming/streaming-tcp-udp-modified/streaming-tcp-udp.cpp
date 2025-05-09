@@ -1030,6 +1030,7 @@ void* pull_stream(void* args) {
             std::cerr << "[Pull Thread " << index << "] Failed to extract response info" << std::endl;
             continue;
         }
+        std::cout << "Frame " << frame_count + 1 << " received at " << get_current_time_us() - response_info.send_timestamp << "us" << std::endl;
         reportResponse(response_info);
         if (packet->stream_index == video_stream_index) {
             int64_t pull_time_ms_before_dec = get_current_time_us() / 1000;
@@ -1037,9 +1038,11 @@ void* pull_stream(void* args) {
             // Process the packet for logging (we don't need to decode for this example)
             int64_t pull_time_ms = get_current_time_us() / 1000;
             
-            pthread_mutex_lock(&cout_mutex);
-            std::cout << "Frame " << frame_count + 1 << " received at " << get_current_time_us() << std::endl;
-            pthread_mutex_unlock(&cout_mutex);
+            if (frame_count % 100 == 0) {
+                pthread_mutex_lock(&cout_mutex);
+                std::cout << "Frame " << frame_count + 1 << " received at " << get_current_time_us() << std::endl;
+                pthread_mutex_unlock(&cout_mutex);
+            }
 
             // Add entry to TimingLogger
             logger.add_entry(
@@ -1096,6 +1099,49 @@ int embed_timestamp(AVPacket *packet) {
     
     memcpy(sei_content + sei_content_size, &timestamp, sizeof(int64_t));
     sei_content_size += sizeof(int64_t);
+    sei_content[sei_content_size++] = 0x80;
+    
+    int new_size = packet->size + sei_content_size + 4;
+    uint8_t *new_data = (uint8_t*)av_malloc(new_size);
+    if (!new_data) return AVERROR(ENOMEM);
+    
+    new_data[0] = (sei_content_size >> 24) & 0xFF;
+    new_data[1] = (sei_content_size >> 16) & 0xFF;
+    new_data[2] = (sei_content_size >> 8) & 0xFF;
+    new_data[3] = sei_content_size & 0xFF;
+    
+    memcpy(new_data + 4, sei_content, sei_content_size);
+
+    memcpy(new_data + 4 + sei_content_size, packet->data, packet->size);
+    av_buffer_unref(&packet->buf);
+    packet->buf = av_buffer_create(new_data, new_size, 
+                                  av_buffer_default_free, NULL, 0);
+    packet->data = new_data;
+    packet->size = new_size;
+    return 0;
+}
+
+int embed_request_info(AVPacket *packet) {
+    RequestHeader request_header = getRequestHeader();
+    uint8_t sei_content[32];
+    int sei_content_size = 0;
+    
+    sei_content[sei_content_size++] = 0x06;
+    sei_content[sei_content_size++] = 0x05;
+    int payload_size = 16 + sizeof(RequestHeader);
+    sei_content[sei_content_size++] = payload_size;
+    
+    const uint8_t uuid[16] = {
+        0x54, 0x69, 0x6D, 0x65, // "Time"
+        0x53, 0x74, 0x61, 0x6D, // "Stam"
+        0x70, 0x00, 0x01, 0x02, 
+        0x03, 0x04, 0x05, 0x06 
+    };
+    memcpy(sei_content + sei_content_size, uuid, 16);
+    sei_content_size += 16;
+    
+    memcpy(sei_content + sei_content_size, &request_header, sizeof(RequestHeader));
+    sei_content_size += sizeof(RequestHeader);
     sei_content[sei_content_size++] = 0x80;
     
     int new_size = packet->size + sei_content_size + 4;
@@ -1227,7 +1273,8 @@ void* push_stream_directly(void* args) {
             int64_t push_time_ms = get_current_time_us() / 1000;
             push_timestamps[frame_count] = push_time_ms;
             push_timestamps_after_enc[frame_count] = push_time_ms;
-            embed_timestamp(packet);
+            // embed_timestamp(packet);
+            embed_request_info(packet);
             // std::cout << packet->pts << ": " << get_timestamp_with_ms() << std::endl;
             ret = av_interleaved_write_frame(output_fmt_ctx, packet);
             if (ret < 0) {
