@@ -520,8 +520,10 @@ void* pull_stream(void* args) {
 
     AVDictionary* options = nullptr;
     av_dict_set(&options, "flags", "low_delay", 0);
-    av_dict_set(&options, "latency", "0", 0);     // Latency in ms
+    av_dict_set(&options, "latency", "30", 0);     // Latency in ms
     av_dict_set(&options, "buffer_size", "1000000", 0);
+    av_dict_set(&options, "probesize",       "32768",    0);
+    av_dict_set(&options, "analyzeduration", "0",        0);  
 
     ret = avformat_open_input(&input_fmt_ctx, input_url, nullptr, &options);
     if (ret < 0) {
