@@ -504,7 +504,7 @@ void* pull_stream(void* args) {
 
     // Create a TimingLogger instance for this pull thread
     std::stringstream ss;
-    ss <<  "/home/zx/edge-use-case/smart-stadium-transcoding/result/video-push-pull-wo-decode-srt/task" << num_pull << "/" << get_timestamp_with_ms() << "/"
+    ss <<  "/root/edge-use-case/smart-stadium-transcoding/result/video-push-pull-wo-decode-srt/task" << num_pull << "/" << get_timestamp_with_ms() << "/"
        << "frame-" << index << ".log"; 
     std::string log_filename = ss.str();
     TimingLogger logger(log_filename);
@@ -524,6 +524,7 @@ void* pull_stream(void* args) {
     av_dict_set(&options, "buffer_size", "1000000", 0);
     av_dict_set(&options, "probesize",       "32768",    0);
     av_dict_set(&options, "analyzeduration", "0",        0);  
+    av_dict_set(&options, "connect_timeout", "10000", 0);
 
     ret = avformat_open_input(&input_fmt_ctx, input_url, nullptr, &options);
     if (ret < 0) {
@@ -1124,7 +1125,7 @@ int main(int argc, char* argv[]) {
     }
 
     // Optionally, wait for a few seconds before starting push
-    sleep(5);
+    sleep(2);
 
     // int ret_create = pthread_create(&push_thread_id, NULL, push_stream, push_args);
     // if (ret_create != 0) {
