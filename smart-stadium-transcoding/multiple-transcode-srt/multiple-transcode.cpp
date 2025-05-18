@@ -233,6 +233,8 @@ bool initialize_decoder(const char* input_url, DecoderInfo& decoder_info) {
     av_dict_set(&format_opts, "latency", "0", 0);         // Latency in ms 
     av_dict_set(&format_opts, "buffer_size", "100000000", 0);
     av_dict_set(&format_opts, "reorder_queue_size", "10000", 0);
+    av_dict_set(&format_opts, "probesize",       "32768",    0);
+    av_dict_set(&format_opts, "analyzeduration", "0",        0);  
     if (avformat_open_input(&decoder_info.input_fmt_ctx, input_url, nullptr, &format_opts) < 0) {
         std::cerr << "Could not open input SRT stream: " << input_url << std::endl;
         av_dict_free(&format_opts);
@@ -456,6 +458,11 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
     AVDictionary* format_opts = nullptr;
     av_dict_set(&format_opts, "latency", "0", 0);     // Latency in ms
     av_dict_set(&format_opts, "buffer_size", "1000000", 0);
+    av_dict_set(&format_opts, "recv_buffer_size", "1000000", 0);
+    av_dict_set(&format_opts, "pkt_size", "1316", 0);        // SRT packet size
+    av_dict_set(&format_opts, "flush_packets", "1", 0);      // Flush packets immediately
+    av_dict_set(&format_opts, "muxdelay", "0", 0);          // Reduce muxing delay
+    av_dict_set(&format_opts, "fflags", "nobuffer", 0);     // Disable input buffering
 
     // Allocate output format context with FLV over SRT
     if (avformat_alloc_output_context2(&output_fmt_ctx, nullptr, "flv", config.output_url.c_str()) < 0) {
