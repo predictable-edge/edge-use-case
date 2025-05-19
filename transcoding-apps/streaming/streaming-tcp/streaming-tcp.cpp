@@ -519,6 +519,9 @@ void* pull_stream(void* args) {
     int ret = 0;
 
     AVDictionary* options = nullptr;
+    av_dict_set(&options, "probesize",       "32768",    0);
+    av_dict_set(&options, "analyzeduration", "0",        0); 
+    av_dict_set(&options, "tcp_nodelay", "1", 0);
 
     ret = avformat_open_input(&input_fmt_ctx, input_url, nullptr, &options);
     if (ret < 0) {
@@ -777,6 +780,7 @@ void* push_stream_directly(void* args) {
 
     // Set up SRT options
     AVDictionary* tcp_options = NULL;
+    av_dict_set(&tcp_options, "tcp_nodelay", "1", 0);
 
     // Open output URL
     ret = avio_open2(&output_fmt_ctx->pb, output_url, AVIO_FLAG_WRITE, NULL, &tcp_options);
