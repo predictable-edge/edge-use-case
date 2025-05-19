@@ -519,6 +519,7 @@ void* pull_stream(void* args) {
     int ret = 0;
 
     AVDictionary* options = nullptr;
+    av_dict_set(&options, "connect_timeout", "10000", 0);
 
     ret = avformat_open_input(&input_fmt_ctx, input_url, nullptr, &options);
     if (ret < 0) {

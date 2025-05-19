@@ -520,7 +520,7 @@ void* pull_stream(void* args) {
 
     AVDictionary* options = nullptr;
     av_dict_set(&options, "flags", "low_delay", 0);
-    av_dict_set(&options, "latency", "30", 0);     // Latency in ms
+    av_dict_set(&options, "latency", "1", 0);     // Latency in ms
     av_dict_set(&options, "buffer_size", "1000000", 0);
     av_dict_set(&options, "probesize",       "32768",    0);
     av_dict_set(&options, "analyzeduration", "0",        0);  
@@ -651,6 +651,7 @@ void* pull_stream(void* args) {
     while (av_read_frame(input_fmt_ctx, packet) >= 0) {
         if (packet->stream_index == video_stream_index) {
             int64_t pull_time_ms_before_dec = get_current_time_us() / 1000;
+            std::cout << "Frame " << frame_count << " received at " << get_current_time_us() << std::endl;
             // std::cout << packet->pts << ": " << get_timestamp_with_ms() << std::endl;
 
             // ret = avcodec_send_packet(codec_ctx, packet);
