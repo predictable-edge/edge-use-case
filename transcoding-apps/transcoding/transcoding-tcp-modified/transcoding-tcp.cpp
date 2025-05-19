@@ -233,7 +233,7 @@ bool initialize_decoder(const char* input_url, DecoderInfo& decoder_info) {
     // Initialize input format context
     decoder_info.input_fmt_ctx = nullptr;
     AVDictionary* format_opts = nullptr;
-    av_dict_set(&format_opts, "probesize",       "327680",    0);
+    av_dict_set(&format_opts, "probesize",       "32768",    0);
     av_dict_set(&format_opts, "analyzeduration", "0",        0); 
     if (avformat_open_input(&decoder_info.input_fmt_ctx, input_url, nullptr, &format_opts) < 0) {
         std::cerr << "Could not open input tcp stream: " << input_url << std::endl;
