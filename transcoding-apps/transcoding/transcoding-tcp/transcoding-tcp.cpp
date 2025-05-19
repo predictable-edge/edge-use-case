@@ -230,6 +230,9 @@ bool initialize_decoder(const char* input_url, DecoderInfo& decoder_info) {
     // Initialize input format context
     decoder_info.input_fmt_ctx = nullptr;
     AVDictionary* format_opts = nullptr;
+    av_dict_set(&format_opts, "probesize",       "32768",    0);
+    av_dict_set(&format_opts, "analyzeduration", "0",        0); 
+    av_dict_set(&format_opts, "tcp_nodelay", "1", 0);
     if (avformat_open_input(&decoder_info.input_fmt_ctx, input_url, nullptr, &format_opts) < 0) {
         std::cerr << "Could not open input tcp stream: " << input_url << std::endl;
         av_dict_free(&format_opts);
@@ -451,6 +454,7 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
 
     // Set TCP options with increased latency and specified packet size
     AVDictionary* format_opts = nullptr;
+    av_dict_set(&format_opts, "tcp_nodelay", "1", 0);
 
     // Allocate output format context with FLV over TCP
     if (avformat_alloc_output_context2(&output_fmt_ctx, nullptr, "flv", config.output_url.c_str()) < 0) {
