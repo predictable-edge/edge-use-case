@@ -24,6 +24,22 @@ extern "C" {
 #include <libswscale/swscale.h>
 }
 
+// Global variables for decoder information with synchronization
+struct GlobalDecoderInfo {
+    AVRational input_time_base;
+    double input_framerate;
+    bool initialized;
+    std::mutex mutex;
+    std::condition_variable cv;
+};
+
+// Global decoder info
+GlobalDecoderInfo g_decoder_info = {
+    {0, 0},   // input_time_base
+    0.0,      // input_framerate
+    false,    // initialized
+};
+
 // Helper function to convert FFmpeg error codes to std::string
 std::string get_error_text(int errnum) {
     char errbuf[AV_ERROR_MAX_STRING_SIZE] = {0};
@@ -152,17 +168,35 @@ public:
 
     void write_to_file() {
         std::lock_guard<std::mutex> lock(mutex_);
-        std::filesystem::path filepath(filename_);
-        std::filesystem::path parent_path = filepath.parent_path();
-        try {
-            if (!parent_path.empty() && !std::filesystem::exists(parent_path)) {
-                std::filesystem::create_directories(parent_path);
-                std::cout << "Created directories: " << parent_path << std::endl;
-            }
-        } catch (const std::filesystem::filesystem_error& e) {
-            std::cerr << "Filesystem error: " << e.what() << std::endl;
-            return;
+        // Fix filesystem namespace issues
+        std::string filepath_str = filename_;
+        bool should_create_dirs = false;
+        std::string parent_path_str;
+        
+        // Extract parent directory path
+        size_t last_slash = filepath_str.find_last_of("/\\");
+        if (last_slash != std::string::npos) {
+            parent_path_str = filepath_str.substr(0, last_slash);
+            should_create_dirs = true;
         }
+        
+        // Create parent directories if needed
+        if (should_create_dirs) {
+            try {
+                // Create directories recursively using system call
+                std::string mkdir_cmd = "mkdir -p '" + parent_path_str + "'";
+                int result = system(mkdir_cmd.c_str());
+                if (result != 0) {
+                    std::cerr << "Failed to create directories: " << parent_path_str << std::endl;
+                } else {
+                    std::cout << "Created directories: " << parent_path_str << std::endl;
+                }
+            } catch (const std::exception& e) {
+                std::cerr << "Error creating directories: " << e.what() << std::endl;
+                return;
+            }
+        }
+        
         std::ofstream ofs(filename_);
         if (!ofs.is_open()) {
             std::cerr << "Failed to open " << filename_ << " for writing." << std::endl;
@@ -233,6 +267,8 @@ bool initialize_decoder(const char* input_url, DecoderInfo& decoder_info) {
     av_dict_set(&format_opts, "probesize",       "32768",    0);
     av_dict_set(&format_opts, "analyzeduration", "0",        0); 
     av_dict_set(&format_opts, "tcp_nodelay", "1", 0);
+
+    std::cout << "input_url: " << input_url << std::endl;
     if (avformat_open_input(&decoder_info.input_fmt_ctx, input_url, nullptr, &format_opts) < 0) {
         std::cerr << "Could not open input tcp stream: " << input_url << std::endl;
         av_dict_free(&format_opts);
@@ -314,6 +350,15 @@ bool initialize_decoder(const char* input_url, DecoderInfo& decoder_info) {
     } else {
         decoder_info.input_framerate = av_q2d(frame_rate_rational);
     }
+
+    // Update global decoder info
+    {
+        std::lock_guard<std::mutex> lock(g_decoder_info.mutex);
+        g_decoder_info.input_time_base = decoder_info.input_time_base;
+        g_decoder_info.input_framerate = decoder_info.input_framerate;
+        g_decoder_info.initialized = true;
+    }
+    g_decoder_info.cv.notify_all();
 
     std::cout << "Input frame rate: " << decoder_info.input_framerate << " FPS" << std::endl;
     std::cout << "Decoder initialized successfully." << std::endl;
@@ -431,11 +476,20 @@ void decoding_thread(AVCodecContext* decoder_ctx, PacketQueue& packet_queue, con
     av_frame_free(&frame);
 }
 
-bool decode_frames(DecoderInfo decoder_info, std::vector<FrameQueue*>& encoder_queues, std::atomic<bool>& decode_finished) {
+// Modified decode_frames function to initialize decoder
+bool decode_frames(const char* input_url, std::vector<FrameQueue*>& encoder_queues, std::atomic<bool>& decode_finished) {
+    DecoderInfo decoder_info;
+    
+    // Initialize decoder
+    if (!initialize_decoder(input_url, decoder_info)) {
+        std::cerr << "Decoder initialization failed" << std::endl;
+        decode_finished = true;
+        for (auto& q : encoder_queues) q->set_finished();
+        return false;
+    }
+    
     PacketQueue packet_queue;
-    std::atomic<bool> encoding_finished(false);
-    std::vector<std::thread> encoder_threads;
-
+    
     std::thread reader(packet_reading_thread, decoder_info.input_fmt_ctx, decoder_info.video_stream_idx, std::ref(packet_queue));
     std::thread decoder(decoding_thread, decoder_info.decoder_ctx, std::ref(packet_queue), std::ref(encoder_queues));
 
@@ -447,14 +501,22 @@ bool decode_frames(DecoderInfo decoder_info, std::vector<FrameQueue*>& encoder_q
     return true;
 }
 
+// Helper function to wait for decoder initialization
+void wait_for_decoder_init() {
+    std::unique_lock<std::mutex> lock(g_decoder_info.mutex);
+    g_decoder_info.cv.wait(lock, []{ return g_decoder_info.initialized; });
+}
+
 // Encoder Function with Initialization and Scaling
-bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRational input_time_base, std::atomic<bool>& encode_finished) {
+bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, std::atomic<bool>& encode_finished) {
     AVFormatContext* output_fmt_ctx = nullptr;
     AVStream* out_stream = nullptr;
 
     // Set TCP options with increased latency and specified packet size
     AVDictionary* format_opts = nullptr;
     av_dict_set(&format_opts, "tcp_nodelay", "1", 0);
+    
+    std::cout << config.output_url << std::endl;
 
     // Allocate output format context with FLV over TCP
     if (avformat_alloc_output_context2(&output_fmt_ctx, nullptr, "flv", config.output_url.c_str()) < 0) {
@@ -490,15 +552,41 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
         return false;
     }
 
+    // Open output URL with format options
+    if (!(output_fmt_ctx->oformat->flags & AVFMT_NOFILE)) {
+        if (avio_open2(&output_fmt_ctx->pb, config.output_url.c_str(), AVIO_FLAG_WRITE, nullptr, &format_opts) < 0) {
+            std::cerr << "Could not open output URL: " << config.output_url << std::endl;
+            avcodec_free_context(&encoder_ctx);
+            avformat_free_context(output_fmt_ctx);
+            av_dict_free(&format_opts);
+            return false;
+        }
+    }
+
+    // Wait for decoder to initialize
+    wait_for_decoder_init();
+    
+    // Get decoder info from global variable
+    AVRational input_time_base;
+    double input_framerate;
+    {
+        std::lock_guard<std::mutex> lock(g_decoder_info.mutex);
+        input_time_base = g_decoder_info.input_time_base;
+        input_framerate = g_decoder_info.input_framerate;
+    }
+
+    // Use the framerate from decoder, or config value as fallback
+    double framerate = input_framerate > 0 ? input_framerate : config.framerate;
+    
     // Set encoder parameters based on configuration
     encoder_ctx->height = config.height;
     encoder_ctx->width = config.width;
     encoder_ctx->sample_aspect_ratio = AVRational{1, 1}; // Square pixels
     encoder_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
-    encoder_ctx->time_base = AVRational{1, static_cast<int>(config.framerate)};          // 30 fps
-    encoder_ctx->framerate = AVRational{static_cast<int>(config.framerate), 1};
-    encoder_ctx->bit_rate = static_cast<int>(config.bitrate * 1000 * 30 / config.framerate);       // Convert kbps to bps
-    encoder_ctx->gop_size = static_cast<int>(config.framerate);
+    encoder_ctx->time_base = AVRational{1, static_cast<int>(framerate)};          // fps from decoder
+    encoder_ctx->framerate = AVRational{static_cast<int>(framerate), 1};
+    encoder_ctx->bit_rate = static_cast<int>(config.bitrate * 1000 * 30 / framerate);       // Convert kbps to bps
+    encoder_ctx->gop_size = static_cast<int>(framerate);
     encoder_ctx->max_b_frames = 0;
     encoder_ctx->thread_count = 0;
 
@@ -529,18 +617,6 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
     }
 
     out_stream->time_base = encoder_ctx->time_base;
-
-    // Open output URL with format options
-    if (!(output_fmt_ctx->oformat->flags & AVFMT_NOFILE)) {
-        if (avio_open2(&output_fmt_ctx->pb, config.output_url.c_str(), AVIO_FLAG_WRITE, nullptr, &format_opts) < 0) {
-            std::cerr << "Could not open output URL: " << config.output_url << std::endl;
-            avcodec_free_context(&encoder_ctx);
-            avformat_free_context(output_fmt_ctx);
-            av_dict_free(&codec_opts);
-            av_dict_free(&format_opts);
-            return false;
-        }
-    }
 
     // Write header to output
     if (avformat_write_header(output_fmt_ctx, &codec_opts) < 0) {
@@ -797,33 +873,23 @@ int main(int argc, char* argv[]) {
         {854,  480,  1000,  "frame-5"},
         {640,  360,  600,   "frame-6"}
     };
-    // std::vector<ResolutionBitrateLog> resolution_bitrate_log = {
-    //     {2560, 1440, 4000,  "frame-1"},
-    //     {2560, 1440, 4000,  "frame-2"},
-    //     {2560, 1440, 4000,  "frame-3"},
-    //     {2560, 1440, 4000,  "frame-4"},
-    //     {2560, 1440, 4000,  "frame-5"},
-    //     {2560, 1440, 4000,  "frame-6"}
-    // };
 
     if (num_outputs > (int) resolution_bitrate_log.size()) {
         std::cerr << "Error: Maximum supported output URLs is " << resolution_bitrate_log.size() << "." << std::endl;
         return 1;
     }
 
-    // Define encoder configurations based on the number of output URLs
-
     // Initialize FFmpeg
     avformat_network_init();
 
     std::atomic<bool> decode_finished(false);
 
-    // Initialize decoder
-    DecoderInfo decoder_info;
-    if (!initialize_decoder(input_url, decoder_info)) {
-        std::cerr << "Decoder initialization failed" << std::endl;
-        avformat_network_deinit();
-        return 1;
+    // Initialize global decoder info structure
+    {
+        std::lock_guard<std::mutex> lock(g_decoder_info.mutex);
+        g_decoder_info.initialized = false;
+        g_decoder_info.input_framerate = 0.0;
+        g_decoder_info.input_time_base = {0, 0};
     }
 
     std::vector<EncoderConfig> encoder_configs;
@@ -835,7 +901,9 @@ int main(int argc, char* argv[]) {
         config.bitrate = resolution_bitrate_log[i].bitrate_kbps;
         config.log_filename = "result/task" + std::to_string(num_outputs) + "/" + get_timestamp_with_ms() + "/"
                               + resolution_bitrate_log[i].log_filename + ".log";
-        config.framerate = decoder_info.input_framerate;
+        
+        // Default framerate (will be updated from decoder)
+        config.framerate = 30.0;
         encoder_configs.push_back(config);
     }
 
@@ -847,7 +915,7 @@ int main(int argc, char* argv[]) {
 
     // Start decoder thread
     std::thread decoder_thread([&]() {
-        if (!decode_frames(decoder_info, frame_queues, decode_finished)) {
+        if (!decode_frames(input_url, frame_queues, decode_finished)) {
             std::cerr << "Decoding failed" << std::endl;
         }
     });
@@ -858,7 +926,7 @@ int main(int argc, char* argv[]) {
     for (size_t i = 0; i < encoder_configs.size(); ++i) {
         enc_finished_flags[i] = false;
         encoder_threads.emplace_back([&, i]() {
-            if (!encode_frames(encoder_configs[i], *frame_queues[i], decoder_info.input_time_base, enc_finished_flags[i])) {
+            if (!encode_frames(encoder_configs[i], *frame_queues[i], enc_finished_flags[i])) {
                 std::cerr << "Encoding failed for " << encoder_configs[i].output_url << std::endl;
             }
         });
