@@ -504,7 +504,7 @@ void* pull_stream(void* args) {
 
     // Create a TimingLogger instance for this pull thread
     std::stringstream ss;
-    ss <<  "/root/edge-use-case/smart-stadium-transcoding/result/video-push-pull-wo-decode-srt/task" << num_pull << "/" << get_timestamp_with_ms() << "/"
+    ss <<  "../../../edge-use-case/smart-stadium-transcoding/result/video-push-pull-wo-decode-srt/task" << num_pull << "/" << get_timestamp_with_ms() << "/"
        << "frame-" << index << ".log"; 
     std::string log_filename = ss.str();
     TimingLogger logger(log_filename);
@@ -525,6 +525,7 @@ void* pull_stream(void* args) {
     av_dict_set(&options, "probesize",       "32768",    0);
     av_dict_set(&options, "analyzeduration", "0",        0);  
     av_dict_set(&options, "connect_timeout", "10000", 0);
+    av_dict_set(&options, "pktfilter", "fec", 0);
 
     ret = avformat_open_input(&input_fmt_ctx, input_url, nullptr, &options);
     if (ret < 0) {
@@ -787,6 +788,7 @@ void* push_stream_directly(void* args) {
     av_dict_set(&srt_options, "streamid", "live", 0);
     av_dict_set(&srt_options, "latency", "0", 0);
     av_dict_set(&srt_options, "buffer_size", "1000000", 0);
+    av_dict_set(&srt_options, "pktfilter", "fec,cols:10,rows:5,group:2,arq:both", 0);
 
     // Open output URL
     ret = avio_open2(&output_fmt_ctx->pb, output_url, AVIO_FLAG_WRITE, NULL, &srt_options);
