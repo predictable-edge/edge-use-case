@@ -454,6 +454,39 @@ void* pull_stream(void* args) {
     return nullptr;
 }
 
+AVPacket* create_timestamp_packet(const AVPacket* base ,uint64_t ts_us)
+{
+    static const uint8_t SEI_PREFIX[5] = {0,0,0,1,0x06};
+    static const uint8_t AUD_NAL[6]    = {0,0,0,1,0x09,0x10};
+
+    const int SIZE = 16 + 6;
+
+    AVPacket* pkt = av_packet_alloc();
+    if (!pkt) return nullptr;
+    if (av_packet_copy_props(pkt, base) < 0) { av_packet_free(&pkt); return nullptr; }
+
+    uint8_t* data = (uint8_t*)av_malloc(SIZE);
+    if (!data){ av_packet_free(&pkt); return nullptr; }
+    uint8_t* p = data;
+
+    memcpy(p, SEI_PREFIX, 5);  p += 5;
+    *p++ = 5;
+    *p++ = 8;
+    for (int i = 7; i >= 0; --i) *p++ = (ts_us >> (i*8)) & 0xFF;
+    *p++ = 0x80;
+
+    memcpy(p, AUD_NAL, sizeof(AUD_NAL));
+    pkt->data = data;
+    pkt->size = SIZE;
+    pkt->buf  = av_buffer_create(data, SIZE, av_buffer_default_free, nullptr, 0);
+
+    pkt->pts   = base->pts + 1;
+    pkt->dts   = base->dts + 1;
+    pkt->flags = 0;
+    pkt->stream_index = base->stream_index;
+    return pkt;
+}
+
 void* push_stream_directly(void* args) {
     char **my_args = (char **)args;
     char *input_filename = my_args[0];
@@ -582,6 +615,14 @@ void* push_stream_directly(void* args) {
                 fprintf(stderr, "[Push Thread] Error writing packet: %s\n", errbuf);
                 pthread_mutex_unlock(&cout_mutex);
                 break;
+            }
+            AVPacket* empty_pkt = create_timestamp_packet(packet, get_current_time_us());
+            if (empty_pkt) {
+                int empty_write_ret = av_write_frame(output_fmt_ctx, empty_pkt);
+                if (empty_write_ret < 0) {
+                    std::cerr << "Error writing empty packet to output" << std::endl;
+                }
+                av_packet_free(&empty_pkt);
             }
             frame_count++;
             // std::cout << "Frame " << frame_count << " pushed at " << get_current_time_us() << std::endl;
