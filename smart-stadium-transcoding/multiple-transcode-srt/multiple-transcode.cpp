@@ -235,7 +235,8 @@ bool initialize_decoder(const char* input_url, DecoderInfo& decoder_info) {
     av_dict_set(&format_opts, "buffer_size", "100000000", 0);
     av_dict_set(&format_opts, "reorder_queue_size", "10000", 0);
     av_dict_set(&format_opts, "probesize",       "32768",    0);
-    av_dict_set(&format_opts, "analyzeduration", "0",        0);  
+    av_dict_set(&format_opts, "analyzeduration", "0",        0); 
+    av_dict_set(&format_opts, "pktfilter", "fec", 0);
 
     if (avformat_open_input(&decoder_info.input_fmt_ctx, input_url, nullptr, &format_opts) < 0) {
         std::cerr << "Could not open input SRT stream: " << input_url << std::endl;
@@ -465,6 +466,7 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
     av_dict_set(&format_opts, "flush_packets", "1", 0);      // Flush packets immediately
     av_dict_set(&format_opts, "muxdelay", "0", 0);          // Reduce muxing delay
     av_dict_set(&format_opts, "fflags", "nobuffer", 0);     // Disable input buffering
+    av_dict_set(&format_opts, "pktfilter", "fec,cols:10,rows:5,group:2,arq:both", 0);
 
     // Allocate output format context with FLV over SRT
     if (avformat_alloc_output_context2(&output_fmt_ctx, nullptr, "flv", config.output_url.c_str()) < 0) {
@@ -844,7 +846,7 @@ int main(int argc, char* argv[]) {
         config.width = resolution_bitrate_log[i].width;
         config.height = resolution_bitrate_log[i].height;
         config.bitrate = resolution_bitrate_log[i].bitrate_kbps;
-        config.log_filename = "/home/zx/edge-use-case/smart-stadium-transcoding/result/multiple-transcode/task" + std::to_string(num_outputs) + "/" + get_timestamp_with_ms() + "/"
+        config.log_filename = "../../../edge-use-case/smart-stadium-transcoding/result/multiple-transcode/task" + std::to_string(num_outputs) + "/" + get_timestamp_with_ms() + "/"
                               + resolution_bitrate_log[i].log_filename + ".log";
         config.framerate = decoder_info.input_framerate;
         encoder_configs.push_back(config);
