@@ -502,6 +502,7 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
     av_dict_set(&format_opts, "flush_packets", "1", 0);          // Flush packets immediately
     av_dict_set(&format_opts, "muxdelay", "0", 0);               // No muxing delay
     av_dict_set(&format_opts, "fifo_size", "0", 0);              // No FIFO for immediate sending
+    av_dict_set(&format_opts, "local_port", "10001", 0);
 
     // Parse output URL to ensure it's properly formatted for UDP
     // UDP URL format: udp://ip:port
@@ -562,12 +563,6 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
     av_dict_set(&codec_opts, "tune", "zerolatency", 0);
     av_dict_set(&codec_opts, "fflags", "nobuffer+flush_packets", 0);
     av_dict_set(&codec_opts, "delay", "0", 0);
-    
-    // UDP specific options
-    if (strstr(output_url.c_str(), "udp:") != nullptr) {
-        av_dict_set(&format_opts, "local_port", "0", 0);         // Let the OS choose a local port
-        av_dict_set(&format_opts, "ttl", "64", 0);              // Time-to-live for UDP packets
-    }
 
     // Open encoder with codec options
     if (avcodec_open2(encoder_ctx, encoder, &codec_opts) < 0) {
