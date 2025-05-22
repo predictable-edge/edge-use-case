@@ -724,7 +724,7 @@ void send_ping_and_wait_pong_from_url(const char* local_url, const char* remote_
 int main(int argc, char* argv[]) {
     if (argc < 4) {
         fprintf(stderr, "Usage: %s <push_input_file> <push_output_url> <pull_input_url1> [<pull_input_url2> ...]\n", argv[0]);
-        fprintf(stderr, "Example: %s snow-scene.mp4 \"rtsp://192.168.2.3:9000/stream\" \"udp://192.168.2.2:10000\"\n", argv[0]);
+        fprintf(stderr, "Example: %s snow-scene.mp4 \"udp://192.168.2.3:9000\" \"udp://192.168.2.2:10000\"\n", argv[0]);
         return 1;
     }
 
