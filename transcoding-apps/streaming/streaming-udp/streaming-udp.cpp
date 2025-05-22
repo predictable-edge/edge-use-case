@@ -252,6 +252,8 @@ void* pull_stream(void* args) {
     av_dict_set(&options, "timeout", "5000000", 0);          // Socket timeout in microseconds
     av_dict_set(&options, "fifo_size", "0", 0);              // No FIFO buffering
     av_dict_set(&options, "overrun_nonfatal", "1", 0);       // Continue on buffer overrun
+    av_dict_set(&options, "probesize", "32648", 0);          // Probe size 32648
+    av_dict_set(&options, "analyzeduration", "0", 0);        // Analyze duration 0 second
 
     // Try to open as h264 first
     const AVInputFormat* input_format = av_find_input_format("h264");
