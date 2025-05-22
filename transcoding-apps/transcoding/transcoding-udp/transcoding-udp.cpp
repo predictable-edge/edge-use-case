@@ -238,6 +238,8 @@ bool initialize_decoder(const char* input_url, DecoderInfo& decoder_info) {
     av_dict_set(&format_opts, "reorder_queue_size", "10", 0);    // Reorder queue size
     av_dict_set(&format_opts, "stimeout", "5000000", 0);         // Socket timeout 5 seconds
     av_dict_set(&format_opts, "listen_timeout", "5000000", 0);   // Connection timeout 5 seconds
+    av_dict_set(&format_opts, "probesize", "32648", 0);          // Probe size 32648
+    av_dict_set(&format_opts, "analyzeduration", "0", 0);        // Analyze duration 0 second
     
     // Set input format to RTSP
     AVInputFormat* input_format = av_find_input_format("rtsp");
@@ -481,8 +483,8 @@ AVPacket* create_timestamp_packet(const AVPacket* base ,uint64_t ts_us)
     pkt->size = SIZE;
     pkt->buf  = av_buffer_create(data, SIZE, av_buffer_default_free, nullptr, 0);
 
-    pkt->pts   = base->pts;
-    pkt->dts   = base->dts;
+    pkt->pts   = base->pts + 1;
+    pkt->dts   = base->dts + 1;
     pkt->flags = 0;
     pkt->stream_index = base->stream_index;
     return pkt;
