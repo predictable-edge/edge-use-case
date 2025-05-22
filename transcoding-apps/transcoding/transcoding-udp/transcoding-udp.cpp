@@ -813,7 +813,7 @@ void wait_for_ping_and_reply_pong() {
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " <input_url> [<extra_output_url> ...]" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " udp://192.168.2.3:9000 [<extra_output_url> ...]" << std::endl;
         std::cerr << "The first output is always the handshake client. Extra outputs (if any) are specified as additional arguments." << std::endl;
         std::cerr << "Supported Resolutions (in order):" << std::endl;
         std::cerr << "1. 3840x2160" << std::endl;
