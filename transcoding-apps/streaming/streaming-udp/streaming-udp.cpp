@@ -18,6 +18,10 @@
 #include <mutex>
 #include <vector>
 #include <filesystem>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <regex>
 
 // Include FFmpeg headers
 extern "C" {
@@ -656,6 +660,67 @@ void* push_stream_directly(void* args) {
     return NULL;
 }
 
+void send_ping_and_wait_pong_from_url(const char* local_url, const char* remote_url) {
+    // Parse local bind address from local_url (e.g. udp://192.168.2.2:10001)
+    std::string slocal(local_url);
+    std::regex re_local("udp://([0-9.]+):(\\d+)");
+    std::smatch mlocal;
+    if (!std::regex_search(slocal, mlocal, re_local)) {
+        fprintf(stderr, "Invalid UDP url: %s\n", local_url);
+        exit(1);
+    }
+    std::string local_ip = mlocal[1];
+    int local_port = std::stoi(mlocal[2]);
+    std::cout << "local_ip: " << local_ip << ", local_port: " << local_port << std::endl;
+
+    // Parse remote ip from remote_url (e.g. udp://192.168.2.3:10001 or rtsp://192.168.2.3:9000/stream)
+    std::string sremote(remote_url);
+    std::regex re_remote_ip("([0-9.]+)");
+    std::smatch mremote;
+    if (!std::regex_search(sremote, mremote, re_remote_ip)) {
+        fprintf(stderr, "Invalid remote url: %s\n", remote_url);
+        exit(1);
+    }
+    std::string remote_ip = mremote[1];
+    int remote_port = 10001; // Always send to transcoding's 10001
+    std::cout << "remote_ip: " << remote_ip << ", remote_port: " << remote_port << std::endl;
+
+    // Create UDP socket and bind to local_ip:local_port
+    int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock < 0) {
+        perror("socket");
+        exit(1);
+    }
+    sockaddr_in local_addr{};
+    local_addr.sin_family = AF_INET;
+    local_addr.sin_addr.s_addr = inet_addr(local_ip.c_str());
+    local_addr.sin_port = htons(local_port);
+    if (bind(sock, (sockaddr*)&local_addr, sizeof(local_addr)) < 0) {
+        perror("bind");
+        close(sock);
+        exit(1);
+    }
+    // Prepare remote transcoding address
+    sockaddr_in remote_addr{};
+    remote_addr.sin_family = AF_INET;
+    remote_addr.sin_addr.s_addr = inet_addr(remote_ip.c_str());
+    remote_addr.sin_port = htons(remote_port);
+    // Send ping to transcoding's 10001
+    sendto(sock, "ping", 4, 0, (sockaddr*)&remote_addr, sizeof(remote_addr));
+    char buf[128] = {0};
+    struct timeval tv = {3, 0};
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    ssize_t n = recv(sock, buf, sizeof(buf), 0);
+    if (n > 0 && strncmp(buf, "pong", 4) == 0) {
+        // ok
+    } else {
+        fprintf(stderr, "Did not receive pong from transcoding.\n");
+        close(sock);
+        exit(1);
+    }
+    close(sock);
+}
+
 int main(int argc, char* argv[]) {
     if (argc < 4) {
         fprintf(stderr, "Usage: %s <push_input_file> <push_output_url> <pull_input_url1> [<pull_input_url2> ...]\n", argv[0]);
@@ -669,6 +734,9 @@ int main(int argc, char* argv[]) {
 
     // Initialize FFmpeg network
     avformat_network_init();
+
+    // UDP handshake: send a ping from the local pull IP:port to transcoding's 10001 port, wait for pong, then proceed.
+    send_ping_and_wait_pong_from_url(argv[3], argv[2]);
 
     // Create pull threads
     std::vector<pthread_t> pull_thread_ids(num_pull);
