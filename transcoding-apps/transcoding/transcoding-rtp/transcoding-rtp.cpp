@@ -32,6 +32,22 @@ std::string get_timestamp_with_ms();
 int64_t get_current_time_us();
 void add_timestamp_to_packet(AVPacket* pkt);
 
+// Global variables for decoder information with synchronization
+struct GlobalDecoderInfo {
+    AVRational input_time_base;
+    double input_framerate;
+    bool initialized;
+    std::mutex mutex;
+    std::condition_variable cv;
+};
+
+// Global decoder info
+GlobalDecoderInfo g_decoder_info = {
+    {0, 0},   // input_time_base
+    0.0,      // input_framerate
+    false,    // initialized
+};
+
 // Helper function to convert FFmpeg error codes to std::string
 std::string get_error_text(int errnum) {
     char errbuf[AV_ERROR_MAX_STRING_SIZE] = {0};
@@ -233,6 +249,12 @@ struct EncoderConfig {
     double framerate;
 };
 
+// Helper function to wait for decoder initialization
+void wait_for_decoder_init() {
+    std::unique_lock<std::mutex> lock(g_decoder_info.mutex);
+    g_decoder_info.cv.wait(lock, []{ return g_decoder_info.initialized; });
+}
+
 // Decoder Initialization and Function
 bool initialize_decoder(const char* input_url, DecoderInfo& decoder_info) {
     // Initialize input format context
@@ -341,6 +363,15 @@ bool initialize_decoder(const char* input_url, DecoderInfo& decoder_info) {
     } else {
         decoder_info.input_framerate = av_q2d(frame_rate_rational);
     }
+
+    // Update global decoder info
+    {
+        std::lock_guard<std::mutex> lock(g_decoder_info.mutex);
+        g_decoder_info.input_time_base = decoder_info.input_time_base;
+        g_decoder_info.input_framerate = decoder_info.input_framerate;
+        g_decoder_info.initialized = true;
+    }
+    g_decoder_info.cv.notify_all();
 
     std::cout << "Input frame rate: " << decoder_info.input_framerate << " FPS" << std::endl;
     std::cout << "Decoder initialized successfully." << std::endl;
@@ -458,11 +489,20 @@ void decoding_thread(AVCodecContext* decoder_ctx, PacketQueue& packet_queue, con
     av_frame_free(&frame);
 }
 
-bool decode_frames(DecoderInfo decoder_info, std::vector<FrameQueue*>& encoder_queues, std::atomic<bool>& decode_finished) {
+// Modified decode_frames function to initialize decoder
+bool decode_frames(const char* input_url, std::vector<FrameQueue*>& encoder_queues, std::atomic<bool>& decode_finished) {
+    DecoderInfo decoder_info;
+    
+    // Initialize decoder
+    if (!initialize_decoder(input_url, decoder_info)) {
+        std::cerr << "Decoder initialization failed" << std::endl;
+        decode_finished = true;
+        for (auto& q : encoder_queues) q->set_finished();
+        return false;
+    }
+    
     PacketQueue packet_queue;
-    std::atomic<bool> encoding_finished(false);
-    std::vector<std::thread> encoder_threads;
-
+    
     std::thread reader(packet_reading_thread, decoder_info.input_fmt_ctx, decoder_info.video_stream_idx, std::ref(packet_queue));
     std::thread decoder(decoding_thread, decoder_info.decoder_ctx, std::ref(packet_queue), std::ref(encoder_queues));
 
@@ -508,7 +548,7 @@ AVPacket* create_timestamp_packet(const AVPacket* base ,uint64_t ts_us)
 }
 
 // Encoder Function with Initialization and Scaling
-bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRational input_time_base, std::atomic<bool>& encode_finished) {
+bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, std::atomic<bool>& encode_finished) {
     AVFormatContext* output_fmt_ctx = nullptr;
     AVStream* out_stream = nullptr;
 
@@ -556,15 +596,30 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
         return false;
     }
 
+    // Wait for decoder to initialize
+    wait_for_decoder_init();
+    
+    // Get decoder info from global variable
+    AVRational input_time_base;
+    double input_framerate;
+    {
+        std::lock_guard<std::mutex> lock(g_decoder_info.mutex);
+        input_time_base = g_decoder_info.input_time_base;
+        input_framerate = g_decoder_info.input_framerate;
+    }
+
+    // Use the framerate from decoder, or config value as fallback
+    double framerate = input_framerate > 0 ? input_framerate : config.framerate;
+
     // Set encoder parameters based on configuration
     encoder_ctx->height = config.height;
     encoder_ctx->width = config.width;
     encoder_ctx->sample_aspect_ratio = AVRational{1, 1}; // Square pixels
     encoder_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
-    encoder_ctx->time_base = AVRational{1, static_cast<int>(config.framerate)};          // Use input framerate
-    encoder_ctx->framerate = AVRational{static_cast<int>(config.framerate), 1};
-    encoder_ctx->bit_rate = static_cast<int>(config.bitrate * 1000 * 30 / config.framerate);       // Convert kbps to bps
-    encoder_ctx->gop_size = static_cast<int>(config.framerate);
+    encoder_ctx->time_base = AVRational{1, static_cast<int>(framerate)};          // Use input framerate
+    encoder_ctx->framerate = AVRational{static_cast<int>(framerate), 1};
+    encoder_ctx->bit_rate = static_cast<int>(config.bitrate * 1000 * 30 / framerate);       // Convert kbps to bps
+    encoder_ctx->gop_size = static_cast<int>(framerate);
     encoder_ctx->max_b_frames = 0;
     encoder_ctx->thread_count = 0;
 
@@ -955,19 +1010,12 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // Define encoder configurations based on the number of output URLs
-
-    // Initialize FFmpeg
-    avformat_network_init();
-
-    std::atomic<bool> decode_finished(false);
-
-    // Initialize decoder
-    DecoderInfo decoder_info;
-    if (!initialize_decoder(input_url, decoder_info)) {
-        std::cerr << "Decoder initialization failed" << std::endl;
-        avformat_network_deinit();
-        return 1;
+    // Initialize global decoder info structure
+    {
+        std::lock_guard<std::mutex> lock(g_decoder_info.mutex);
+        g_decoder_info.initialized = false;
+        g_decoder_info.input_framerate = 0.0;
+        g_decoder_info.input_time_base = {0, 0};
     }
 
     std::vector<EncoderConfig> encoder_configs;
@@ -979,19 +1027,26 @@ int main(int argc, char* argv[]) {
         config.bitrate = resolution_bitrate_log[i].bitrate_kbps;
         config.log_filename = "result/task" + std::to_string(num_outputs) + "/" + get_timestamp_with_ms() + "/"
                               + resolution_bitrate_log[i].log_filename + ".log";
-        config.framerate = decoder_info.input_framerate;
+        
+        // Default framerate (will be updated from decoder)
+        config.framerate = 30.0;
         encoder_configs.push_back(config);
     }
 
-    // // Prepare frame queues for each encoder
+    // Prepare frame queues for each encoder
     std::vector<FrameQueue*> frame_queues;
     for (size_t i = 0; i < encoder_configs.size(); ++i) {
         frame_queues.push_back(new FrameQueue());
     }
 
+    // Initialize FFmpeg
+    avformat_network_init();
+
+    std::atomic<bool> decode_finished(false);
+
     // Start decoder thread
     std::thread decoder_thread([&]() {
-        if (!decode_frames(decoder_info, frame_queues, decode_finished)) {
+        if (!decode_frames(input_url, frame_queues, decode_finished)) {
             std::cerr << "Decoding failed" << std::endl;
         }
     });
@@ -1002,7 +1057,7 @@ int main(int argc, char* argv[]) {
     for (size_t i = 0; i < encoder_configs.size(); ++i) {
         enc_finished_flags[i] = false;
         encoder_threads.emplace_back([&, i]() {
-            if (!encode_frames(encoder_configs[i], *frame_queues[i], decoder_info.input_time_base, enc_finished_flags[i])) {
+            if (!encode_frames(encoder_configs[i], *frame_queues[i], enc_finished_flags[i])) {
                 std::cerr << "Encoding failed for " << encoder_configs[i].output_url << std::endl;
             }
         });
