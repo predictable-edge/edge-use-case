@@ -850,7 +850,7 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, std::at
                 }
                 av_packet_free(&empty_pkt);
             }
-            std::cout << "Encoded frame " << frame_count + 1 << " at " << get_current_time_us() << std::endl;
+            std::cout << "Encoded frame " << (frame_count + 2) / 2 << " at " << get_current_time_us() << std::endl;
             av_packet_free(&enc_pkt);
         }
 
