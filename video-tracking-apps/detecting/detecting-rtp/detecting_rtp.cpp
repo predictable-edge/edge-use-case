@@ -296,12 +296,25 @@ bool initialize_decoder(const char* input_url, DecoderInfo& decoder_info) {
     // Initialize input format context
     decoder_info.input_fmt_ctx = nullptr;
     AVDictionary* format_opts = nullptr;
-    // av_dict_set(&format_opts, "fflags",          "nobuffer", 0);
-    av_dict_set(&format_opts, "probesize",       "327680",    0);
-    av_dict_set(&format_opts, "analyzeduration", "0",        0);  
-    av_dict_set(&format_opts, "tcp_nodelay", "1", 0);
-    if (avformat_open_input(&decoder_info.input_fmt_ctx, input_url, nullptr, &format_opts) < 0) {
-        std::cerr << "Could not open input tcp stream: " << input_url << std::endl;
+    av_dict_set(&format_opts, "buffer_size", "8192000", 0);      // Increase buffer size
+    av_dict_set(&format_opts, "max_delay", "500000", 0);         // 500ms max delay
+    av_dict_set(&format_opts, "reorder_queue_size", "100000", 0);    // Reorder queue size
+    av_dict_set(&format_opts, "jitter_buffer_size", "100000", 0);    // Jitter buffer size
+    av_dict_set(&format_opts, "stimeout", "5000000", 0);         // Socket timeout 5 seconds
+    av_dict_set(&format_opts, "listen_timeout", "5000000", 0);   // Connection timeout 5 seconds
+    av_dict_set(&format_opts, "probesize", "32648", 0);          // Probe size 32648
+    av_dict_set(&format_opts, "analyzeduration", "0", 0);        // Analyze duration 0 second
+    av_dict_set(&format_opts, "protocol_whitelist", "file,rtp,udp", 0);
+    // if (avformat_open_input(&decoder_info.input_fmt_ctx, input_url, nullptr, &format_opts) < 0) {
+    //     std::cerr << "Could not open input tcp stream: " << input_url << std::endl;
+    //     av_dict_free(&format_opts);
+    //     return false;
+    // }
+
+    std::string sdp_file = "stream_ul.sdp";
+    int ret = avformat_open_input(&decoder_info.input_fmt_ctx, sdp_file.c_str(), nullptr, &format_opts);
+    if (ret < 0) {
+        std::cerr << "Could not open SDP file: " << get_error_text(ret) << std::endl;
         av_dict_free(&format_opts);
         return false;
     }
@@ -453,8 +466,8 @@ void packet_reading_thread(AVFormatContext* input_fmt_ctx, int video_stream_idx,
             std::cerr << "Error reading frame: " << get_error_text(ret) << std::endl;
             break;
         }
-        int64_t timestamp = extract_timestamp(packet);
-        printf("timestamp: %ld\n", timestamp);
+        // int64_t timestamp = extract_timestamp(packet);
+        // printf("timestamp: %ld\n", timestamp);
         if (packet->stream_index == video_stream_idx) {
             packet_queue.push(packet);
             packet = av_packet_alloc();

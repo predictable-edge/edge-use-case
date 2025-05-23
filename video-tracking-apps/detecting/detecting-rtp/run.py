@@ -50,7 +50,7 @@ def main():
     time.sleep(3)
     
     # Run C++ program with command line arguments
-    cpp_cmd = f"./detecting_tcp {args.input_url}"
+    cpp_cmd = f"./detecting_rtp {args.input_url}"
     if args.port != 9876:  # Only add port if it's different from default
         cpp_cmd += f" {args.port}"
     
