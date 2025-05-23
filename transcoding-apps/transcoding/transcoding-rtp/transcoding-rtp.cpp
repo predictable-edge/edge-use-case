@@ -519,9 +519,12 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
     av_dict_set(&format_opts, "pkt_size", "1316", 0);          // Optimal RTP packet size
     av_dict_set(&format_opts, "flush_packets", "1", 0);        // Flush packets immediately
 
+    std::string output_url = config.output_url + "?localrtpport=10001";
+    std::cout << "output_url: " << output_url << std::endl;
+
     // Create output format context for RTP instead of RTSP
-    if (avformat_alloc_output_context2(&output_fmt_ctx, nullptr, "rtp", config.output_url.c_str()) < 0) {
-        std::cerr << "Could not create output context for " << config.output_url << std::endl;
+    if (avformat_alloc_output_context2(&output_fmt_ctx, nullptr, "rtp", output_url.c_str()) < 0) {
+        std::cerr << "Could not create output context for " << output_url << std::endl;
         av_dict_free(&format_opts);
         return false;
     }
@@ -619,8 +622,8 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
 
     // Open output URL with format options
     if (!(output_fmt_ctx->oformat->flags & AVFMT_NOFILE)) {
-        if (avio_open2(&output_fmt_ctx->pb, config.output_url.c_str(), AVIO_FLAG_WRITE, nullptr, &format_opts) < 0) {
-            std::cerr << "Could not open output URL: " << config.output_url << std::endl;
+        if (avio_open2(&output_fmt_ctx->pb, output_url.c_str(), AVIO_FLAG_WRITE, nullptr, &format_opts) < 0) {
+            std::cerr << "Could not open output URL: " << output_url << std::endl;
             avcodec_free_context(&encoder_ctx);
             avformat_free_context(output_fmt_ctx);
             av_dict_free(&codec_opts);
