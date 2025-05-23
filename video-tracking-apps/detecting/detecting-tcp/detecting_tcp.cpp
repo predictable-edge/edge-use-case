@@ -299,6 +299,7 @@ bool initialize_decoder(const char* input_url, DecoderInfo& decoder_info) {
     // av_dict_set(&format_opts, "fflags",          "nobuffer", 0);
     av_dict_set(&format_opts, "probesize",       "327680",    0);
     av_dict_set(&format_opts, "analyzeduration", "0",        0);  
+    av_dict_set(&format_opts, "tcp_nodelay", "1", 0);
     if (avformat_open_input(&decoder_info.input_fmt_ctx, input_url, nullptr, &format_opts) < 0) {
         std::cerr << "Could not open input tcp stream: " << input_url << std::endl;
         av_dict_free(&format_opts);
