@@ -542,13 +542,46 @@ int embed_timestamp(AVPacket *packet) {
 }
 
 
+AVPacket* create_timestamp_packet(const AVPacket* base ,uint64_t ts_us)
+{
+    static const uint8_t SEI_PREFIX[5] = {0,0,0,1,0x06};
+    static const uint8_t AUD_NAL[6]    = {0,0,0,1,0x09,0x10};
+
+    const int SIZE = 16 + 6;
+
+    AVPacket* pkt = av_packet_alloc();
+    if (!pkt) return nullptr;
+    if (av_packet_copy_props(pkt, base) < 0) { av_packet_free(&pkt); return nullptr; }
+
+    uint8_t* data = (uint8_t*)av_malloc(SIZE);
+    if (!data){ av_packet_free(&pkt); return nullptr; }
+    uint8_t* p = data;
+
+    memcpy(p, SEI_PREFIX, 5);  p += 5;
+    *p++ = 5;
+    *p++ = 8;
+    for (int i = 7; i >= 0; --i) *p++ = (ts_us >> (i*8)) & 0xFF;
+    *p++ = 0x80;
+
+    memcpy(p, AUD_NAL, sizeof(AUD_NAL));
+    pkt->data = data;
+    pkt->size = SIZE;
+    pkt->buf  = av_buffer_create(data, SIZE, av_buffer_default_free, nullptr, 0);
+
+    pkt->pts   = base->pts + 1;
+    pkt->dts   = base->dts + 1;
+    pkt->flags = 0;
+    pkt->stream_index = base->stream_index;
+    return pkt;
+}
+
 void* push_stream_directly(void* args) {
     char **my_args = (char **)args;
     char *input_filename = my_args[0];
     char *output_url = my_args[1];
 
     pthread_mutex_lock(&cout_mutex);
-    printf("[Push Thread] Starting push_stream...\n");
+    printf("[Push Thread] Starting push_stream with RTSP...\n");
     pthread_mutex_unlock(&cout_mutex);
 
     AVFormatContext* input_fmt_ctx = NULL;
@@ -575,7 +608,7 @@ void* push_stream_directly(void* args) {
 
     // Allocate output format context
     AVFormatContext* output_fmt_ctx = NULL;
-    ret = avformat_alloc_output_context2(&output_fmt_ctx, NULL, "flv", output_url);
+    ret = avformat_alloc_output_context2(&output_fmt_ctx, NULL, "rtp", output_url);
     if (!output_fmt_ctx) {
         fprintf(stderr, "[Push Thread] Could not create output context.\n");
         exit(1);
@@ -594,16 +627,42 @@ void* push_stream_directly(void* args) {
 
     out_stream->codecpar->codec_tag = 0;
 
-    // Set up SRT options
-    AVDictionary* tcp_options = NULL;
-    av_dict_set(&tcp_options, "tcp_nodelay", "1", 0);
+    // Set up UDP-specific options for low latency
+    AVDictionary* rtp_options = NULL;
+    av_dict_set(&rtp_options, "listen_timeout", "5000000", 0);    // Listen timeout 5 seconds
+    av_dict_set(&rtp_options, "max_delay", "500000", 0);          // Max delay 500ms
+    av_dict_set(&rtp_options, "reorder_queue_size", "10", 0);     // Reorder queue size
+    av_dict_set(&rtp_options, "buffer_size", "1048576", 0);       // 1MB buffer
+    av_dict_set(&rtp_options, "pkt_size", "1316", 0);             // Optimal packet size
+    av_dict_set(&rtp_options, "flush_packets", "1", 0);           // Flush packets immediately
 
-    // Open output URL
-    ret = avio_open2(&output_fmt_ctx->pb, output_url, AVIO_FLAG_WRITE, NULL, &tcp_options);
+    char sdp_buffer[4096];
+    int sdp_ret = av_sdp_create(&output_fmt_ctx, 1, sdp_buffer, sizeof(sdp_buffer));
+    if (sdp_ret < 0) {
+        std::cerr << "Failed to create SDP" << std::endl;
+    } else {
+        // Save SDP to file
+        std::ofstream sdp_file("stream_ul.sdp");
+        if (sdp_file.is_open()) {
+            sdp_file << sdp_buffer;
+            sdp_file.close();
+            std::cout << "SDP file generated: stream_ul.sdp" << std::endl;
+            std::cout << "SDP Content:\n" << sdp_buffer << std::endl;
+            std::cout << "----------------------\n";
+        } else {
+            std::cerr << "Could not open stream_ul.sdp for writing" << std::endl;
+        }
+    }
+
+    // Open output URL with UDP options
+    ret = avio_open2(&output_fmt_ctx->pb, output_url, AVIO_FLAG_WRITE, NULL, &rtp_options);
     CHECK_ERR(ret, "Could not open output URL");
 
+    // Set the maximum interleave delta to a very low value for decreased latency
+    output_fmt_ctx->max_interleave_delta = 0;
+
     // Write header
-    ret = avformat_write_header(output_fmt_ctx, NULL);
+    ret = avformat_write_header(output_fmt_ctx, &rtp_options);
     CHECK_ERR(ret, "Error occurred when writing header to output");
 
     AVPacket* packet = av_packet_alloc();
@@ -631,10 +690,9 @@ void* push_stream_directly(void* args) {
                 continue;
             }
 
-            // Record the time for this frame for latency calculation
-
             int64_t pts_time = av_rescale_q(pts, time_base, AV_TIME_BASE_Q);
             av_packet_rescale_ts(packet, time_base, out_stream->time_base);
+            
             // Calculate the expected send time
             int64_t now = av_gettime() - start_time;
 
@@ -649,19 +707,28 @@ void* push_stream_directly(void* args) {
                     }
                 }
             }
+
+            // Write packet
             frame_timestamps[frame_count] = get_current_time_us();
-            embed_timestamp(packet);
-            ret = av_interleaved_write_frame(output_fmt_ctx, packet);
+            ret = av_write_frame(output_fmt_ctx, packet);
             if (ret < 0) {
                 pthread_mutex_lock(&cout_mutex);
                 char errbuf[AV_ERROR_MAX_STRING_SIZE];
                 av_strerror(ret, errbuf, sizeof(errbuf));
-                fprintf(stderr, "[Push Thread] Error muxing packet: %s\n", errbuf);
+                fprintf(stderr, "[Push Thread] Error writing packet: %s\n", errbuf);
                 pthread_mutex_unlock(&cout_mutex);
                 break;
             }
+            AVPacket* empty_pkt = create_timestamp_packet(packet, get_current_time_us());
+            if (empty_pkt) {
+                int empty_write_ret = av_write_frame(output_fmt_ctx, empty_pkt);
+                if (empty_write_ret < 0) {
+                    std::cerr << "Error writing empty packet to output" << std::endl;
+                }
+                av_packet_free(&empty_pkt);
+            }
             frame_count++;
-            total_frames_sent = frame_count;  // Update atomic counter
+            // std::cout << "Frame " << frame_count << " pushed at " << get_current_time_us() << std::endl;
         }
         av_packet_unref(packet);
     }
@@ -683,15 +750,163 @@ void* push_stream_directly(void* args) {
     avformat_free_context(output_fmt_ctx);
     avformat_close_input(&input_fmt_ctx);
 
-    // Signal that all frames have been sent
-    all_frames_sent = true;
-    
     pthread_mutex_lock(&cout_mutex);
-    printf("[Push Thread] Finished push_stream. Sent %d frames.\n", total_frames_sent.load());
+    printf("[Push Thread] Finished push_stream.\n");
     pthread_mutex_unlock(&cout_mutex);
 
     return NULL;
 }
+
+// void* push_stream_directly(void* args) {
+//     char **my_args = (char **)args;
+//     char *input_filename = my_args[0];
+//     char *output_url = my_args[1];
+
+//     pthread_mutex_lock(&cout_mutex);
+//     printf("[Push Thread] Starting push_stream...\n");
+//     pthread_mutex_unlock(&cout_mutex);
+
+//     AVFormatContext* input_fmt_ctx = NULL;
+//     int ret = avformat_open_input(&input_fmt_ctx, input_filename, NULL, NULL);
+//     CHECK_ERR(ret, "Could not open input file for push_stream");
+
+//     ret = avformat_find_stream_info(input_fmt_ctx, NULL);
+//     CHECK_ERR(ret, "Failed to retrieve input stream information for push_stream");
+
+//     int video_stream_idx = -1;
+//     for (unsigned int i = 0; i < input_fmt_ctx->nb_streams; i++) {
+//         if (input_fmt_ctx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+//             video_stream_idx = i;
+//             break;
+//         }
+//     }
+
+//     if (video_stream_idx == -1) {
+//         fprintf(stderr, "[Push Thread] Could not find a video stream in the input.\n");
+//         exit(1);
+//     }
+
+//     AVCodecParameters* codecpar = input_fmt_ctx->streams[video_stream_idx]->codecpar;
+
+//     // Allocate output format context
+//     AVFormatContext* output_fmt_ctx = NULL;
+//     ret = avformat_alloc_output_context2(&output_fmt_ctx, NULL, "flv", output_url);
+//     if (!output_fmt_ctx) {
+//         fprintf(stderr, "[Push Thread] Could not create output context.\n");
+//         exit(1);
+//     }
+
+//     // Create new stream for output
+//     AVStream* out_stream = avformat_new_stream(output_fmt_ctx, NULL);
+//     if (!out_stream) {
+//         fprintf(stderr, "[Push Thread] Failed allocating output stream.\n");
+//         exit(1);
+//     }
+
+//     // Copy codec parameters from input to output
+//     ret = avcodec_parameters_copy(out_stream->codecpar, codecpar);
+//     CHECK_ERR(ret, "Failed to copy codec parameters to output stream");
+
+//     out_stream->codecpar->codec_tag = 0;
+
+//     // Set up SRT options
+//     AVDictionary* tcp_options = NULL;
+//     av_dict_set(&tcp_options, "tcp_nodelay", "1", 0);
+
+//     // Open output URL
+//     ret = avio_open2(&output_fmt_ctx->pb, output_url, AVIO_FLAG_WRITE, NULL, &tcp_options);
+//     CHECK_ERR(ret, "Could not open output URL");
+
+//     // Write header
+//     ret = avformat_write_header(output_fmt_ctx, NULL);
+//     CHECK_ERR(ret, "Error occurred when writing header to output");
+
+//     AVPacket* packet = av_packet_alloc();
+//     if (!packet) {
+//         fprintf(stderr, "[Push Thread] Could not allocate packet.\n");
+//         exit(1);
+//     }
+
+//     // Get the stream's time base
+//     AVRational time_base = input_fmt_ctx->streams[video_stream_idx]->time_base;
+
+//     // Record the start time
+//     auto start_time = av_gettime();
+//     int64_t frame_count = 0;
+//     while (av_read_frame(input_fmt_ctx, packet) >= 0) {
+//         if (packet->stream_index == video_stream_idx) {
+//             // Rescale packet timestamps
+//             packet->stream_index = out_stream->index;
+//             int64_t pts = packet->pts;
+//             if (pts == AV_NOPTS_VALUE) {
+//                 pts = packet->dts;
+//             }
+//             if (pts == AV_NOPTS_VALUE) {
+//                 fprintf(stderr, "Packet has no valid pts or dts.\n");
+//                 continue;
+//             }
+
+//             // Record the time for this frame for latency calculation
+
+//             int64_t pts_time = av_rescale_q(pts, time_base, AV_TIME_BASE_Q);
+//             av_packet_rescale_ts(packet, time_base, out_stream->time_base);
+//             // Calculate the expected send time
+//             int64_t now = av_gettime() - start_time;
+
+//             if (pts_time > now) {
+//                 int64_t sleep_time = pts_time - now;
+//                 if (sleep_time > 0) {
+//                     int ret = av_usleep(sleep_time);
+//                     if (ret < 0) {
+//                         pthread_mutex_lock(&cout_mutex);
+//                         fprintf(stderr, "[Push Thread] av_usleep was interrupted.\n");
+//                         pthread_mutex_unlock(&cout_mutex);
+//                     }
+//                 }
+//             }
+//             frame_timestamps[frame_count] = get_current_time_us();
+//             embed_timestamp(packet);
+//             ret = av_interleaved_write_frame(output_fmt_ctx, packet);
+//             if (ret < 0) {
+//                 pthread_mutex_lock(&cout_mutex);
+//                 char errbuf[AV_ERROR_MAX_STRING_SIZE];
+//                 av_strerror(ret, errbuf, sizeof(errbuf));
+//                 fprintf(stderr, "[Push Thread] Error muxing packet: %s\n", errbuf);
+//                 pthread_mutex_unlock(&cout_mutex);
+//                 break;
+//             }
+//             frame_count++;
+//             total_frames_sent = frame_count;  // Update atomic counter
+//         }
+//         av_packet_unref(packet);
+//     }
+
+//     // Write trailer
+//     ret = av_write_trailer(output_fmt_ctx);
+//     if (ret < 0) {
+//         pthread_mutex_lock(&cout_mutex);
+//         char errbuf[AV_ERROR_MAX_STRING_SIZE];
+//         av_strerror(ret, errbuf, sizeof(errbuf));
+//         fprintf(stderr, "[Push Thread] Error writing trailer: %s\n", errbuf);
+//         pthread_mutex_unlock(&cout_mutex);
+//     }
+
+//     av_packet_free(&packet);
+//     if (!(output_fmt_ctx->oformat->flags & AVFMT_NOFILE)) {
+//         avio_closep(&output_fmt_ctx->pb);
+//     }
+//     avformat_free_context(output_fmt_ctx);
+//     avformat_close_input(&input_fmt_ctx);
+
+//     // Signal that all frames have been sent
+//     all_frames_sent = true;
+    
+//     pthread_mutex_lock(&cout_mutex);
+//     printf("[Push Thread] Finished push_stream. Sent %d frames.\n", total_frames_sent.load());
+//     pthread_mutex_unlock(&cout_mutex);
+
+//     return NULL;
+// }
 
 int main(int argc, char* argv[]) {
     if (argc < 5) {
