@@ -16,6 +16,10 @@
 #include <filesystem>
 #include <memory.h>
 #include <string.h> // For memcpy
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 // FFmpeg includes
 extern "C" {
@@ -47,6 +51,10 @@ GlobalDecoderInfo g_decoder_info = {
     0.0,      // input_framerate
     false,    // initialized
 };
+
+// Global variables to store client IP and port from handshake
+std::string g_client_ip;
+int g_client_port = 0;
 
 // Helper function to convert FFmpeg error codes to std::string
 std::string get_error_text(int errnum) {
@@ -968,12 +976,41 @@ void add_timestamp_to_packet(AVPacket* pkt) {
     av_packet_free(&new_pkt);
 }
 
+void wait_for_ping_and_reply_pong() {
+    int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock < 0) {
+        perror("socket");
+        exit(1);
+    }
+    sockaddr_in addr{}, peer_addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = htons(10001);
+    if (bind(sock, (sockaddr*)&addr, sizeof(addr)) < 0) {
+        perror("bind");
+        close(sock);
+        exit(1);
+    }
+    char buf[128] = {0};
+    socklen_t peer_len = sizeof(peer_addr);
+    ssize_t n = recvfrom(sock, buf, sizeof(buf), 0, (sockaddr*)&peer_addr, &peer_len);
+    if (n > 0 && strncmp(buf, "ping", 4) == 0) {
+        char ipbuf[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &peer_addr.sin_addr, ipbuf, sizeof(ipbuf));
+        g_client_ip = ipbuf;
+        g_client_port = ntohs(peer_addr.sin_port);
+        printf("Received ping from client %s:%d\n", g_client_ip.c_str(), g_client_port);
+        sendto(sock, "pong", 4, 0, (sockaddr*)&peer_addr, peer_len);
+    }
+    close(sock);
+}
+
 int main(int argc, char* argv[]) {
     // Expecting at least 2 arguments: program, input_url, and at least 1 output_url
     // Maximum of 6 output URLs supported
-    if (argc < 3) {
+    if (argc < 2) {
         std::cerr << "Usage: " << argv[0] 
-                  << " rtp://192.168.2.3:9000 rtp://192.168.2.2:5004" 
+                  << " rtp://192.168.2.3:9000" 
                   << std::endl;
         std::cerr << "Supported Resolutions (in order):" << std::endl;
         std::cerr << "1. 3840x2160" << std::endl;
@@ -985,8 +1022,11 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    // UDP handshake: wait for a ping from the streaming process on port 10001, reply with pong, then proceed.
+    wait_for_ping_and_reply_pong();
+
     const char* input_url = argv[1];
-    int num_outputs = argc - 2;
+    int num_outputs = argc - 1;
 
     // Define possible resolutions in order
     struct ResolutionBitrateLog {
@@ -1021,7 +1061,15 @@ int main(int argc, char* argv[]) {
     std::vector<EncoderConfig> encoder_configs;
     for (int i = 0; i < num_outputs; ++i) {
         EncoderConfig config;
-        config.output_url = argv[2 + i];
+        if (i == 0) {
+            // Use the client IP and port from handshake for the first output
+            std::ostringstream oss;
+            oss << "rtp://" << g_client_ip << ":" << g_client_port;
+            config.output_url = oss.str();
+        } else {
+            // Use argv[1 + i] for the rest
+            config.output_url = argv[1 + i];
+        }
         config.width = resolution_bitrate_log[i].width;
         config.height = resolution_bitrate_log[i].height;
         config.bitrate = resolution_bitrate_log[i].bitrate_kbps;
