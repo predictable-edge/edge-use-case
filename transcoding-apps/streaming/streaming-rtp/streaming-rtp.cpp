@@ -563,7 +563,7 @@ void* push_stream_directly(void* args) {
 
     // Allocate output format context
     AVFormatContext* output_fmt_ctx = NULL;
-    ret = avformat_alloc_output_context2(&output_fmt_ctx, NULL, "rtsp", output_url);
+    ret = avformat_alloc_output_context2(&output_fmt_ctx, NULL, "rtp", output_url);
     if (!output_fmt_ctx) {
         fprintf(stderr, "[Push Thread] Could not create output context.\n");
         exit(1);
@@ -583,24 +583,41 @@ void* push_stream_directly(void* args) {
     out_stream->codecpar->codec_tag = 0;
 
     // Set up UDP-specific options for low latency
-    AVDictionary* rtsp_options = NULL;
-    av_dict_set(&rtsp_options, "rtsp_transport", "udp", 0);        // Use UDP for RTP transport
-    av_dict_set(&rtsp_options, "listen_timeout", "5000000", 0);    // Listen timeout 5 seconds
-    av_dict_set(&rtsp_options, "max_delay", "500000", 0);          // Max delay 500ms
-    av_dict_set(&rtsp_options, "reorder_queue_size", "10", 0);     // Reorder queue size
-    av_dict_set(&rtsp_options, "buffer_size", "1048576", 0);       // 1MB buffer
-    av_dict_set(&rtsp_options, "pkt_size", "1316", 0);             // Optimal packet size
-    av_dict_set(&rtsp_options, "flush_packets", "1", 0);           // Flush packets immediately
+    AVDictionary* rtp_options = NULL;
+    av_dict_set(&rtp_options, "listen_timeout", "5000000", 0);    // Listen timeout 5 seconds
+    av_dict_set(&rtp_options, "max_delay", "500000", 0);          // Max delay 500ms
+    av_dict_set(&rtp_options, "reorder_queue_size", "10", 0);     // Reorder queue size
+    av_dict_set(&rtp_options, "buffer_size", "1048576", 0);       // 1MB buffer
+    av_dict_set(&rtp_options, "pkt_size", "1316", 0);             // Optimal packet size
+    av_dict_set(&rtp_options, "flush_packets", "1", 0);           // Flush packets immediately
+
+    char sdp_buffer[4096];
+    int sdp_ret = av_sdp_create(&output_fmt_ctx, 1, sdp_buffer, sizeof(sdp_buffer));
+    if (sdp_ret < 0) {
+        std::cerr << "Failed to create SDP" << std::endl;
+    } else {
+        // Save SDP to file
+        std::ofstream sdp_file("stream_ul.sdp");
+        if (sdp_file.is_open()) {
+            sdp_file << sdp_buffer;
+            sdp_file.close();
+            std::cout << "SDP file generated: stream_ul.sdp" << std::endl;
+            std::cout << "SDP Content:\n" << sdp_buffer << std::endl;
+            std::cout << "----------------------\n";
+        } else {
+            std::cerr << "Could not open stream_ul.sdp for writing" << std::endl;
+        }
+    }
 
     // Open output URL with UDP options
-    // ret = avio_open2(&output_fmt_ctx->pb, output_url, AVIO_FLAG_WRITE, NULL, &rtsp_options);
-    // CHECK_ERR(ret, "Could not open output URL");
+    ret = avio_open2(&output_fmt_ctx->pb, output_url, AVIO_FLAG_WRITE, NULL, &rtp_options);
+    CHECK_ERR(ret, "Could not open output URL");
 
     // Set the maximum interleave delta to a very low value for decreased latency
     output_fmt_ctx->max_interleave_delta = 0;
 
     // Write header
-    ret = avformat_write_header(output_fmt_ctx, &rtsp_options);
+    ret = avformat_write_header(output_fmt_ctx, &rtp_options);
     CHECK_ERR(ret, "Error occurred when writing header to output");
 
     AVPacket* packet = av_packet_alloc();
@@ -751,7 +768,7 @@ int64_t extract_timestamp_from_packet(AVPacket* pkt) {
 int main(int argc, char* argv[]) {
     if (argc < 4) {
         fprintf(stderr, "Usage: %s <push_input_file> <push_output_url> <pull_input_url1> [<pull_input_url2> ...]\n", argv[0]);
-        fprintf(stderr, "Example: %s snow-scene.mp4 \"rtsp://192.168.2.3:9000/stream\" \"rtp://192.168.2.2:5004\"\n", argv[0]);
+        fprintf(stderr, "Example: %s snow-scene.mp4 \"rtp://192.168.2.3:9000\" \"rtp://192.168.2.2:5004\"\n", argv[0]);
         return 1;
     }
 
