@@ -239,8 +239,8 @@ bool initialize_decoder(const char* input_url, DecoderInfo& decoder_info) {
     decoder_info.input_fmt_ctx = nullptr;
     AVDictionary* format_opts = nullptr;
     // Set RTSP specific options
-    av_dict_set(&format_opts, "rtsp_transport", "udp", 0);       // Use UDP for RTP transport
-    av_dict_set(&format_opts, "rtsp_flags", "prefer_tcp", 0);    // Prefer TCP for RTSP control connection
+    // av_dict_set(&format_opts, "rtsp_transport", "udp", 0);       // Use UDP for RTP transport
+    // av_dict_set(&format_opts, "rtsp_flags", "prefer_tcp", 0);    // Prefer TCP for RTSP control connection
     av_dict_set(&format_opts, "buffer_size", "8192000", 0);      // Increase buffer size
     av_dict_set(&format_opts, "max_delay", "500000", 0);         // 500ms max delay
     av_dict_set(&format_opts, "reorder_queue_size", "10", 0);    // Reorder queue size
@@ -248,11 +248,20 @@ bool initialize_decoder(const char* input_url, DecoderInfo& decoder_info) {
     av_dict_set(&format_opts, "listen_timeout", "5000000", 0);   // Connection timeout 5 seconds
     av_dict_set(&format_opts, "probesize", "32648", 0);          // Probe size 32648
     av_dict_set(&format_opts, "analyzeduration", "0", 0);        // Analyze duration 0 second
+    av_dict_set(&format_opts, "protocol_whitelist", "file,rtp,udp", 0);
     
     // Set input format to RTSP
-    AVInputFormat* input_format = av_find_input_format("rtsp");
-    if (avformat_open_input(&decoder_info.input_fmt_ctx, input_url, input_format, &format_opts) < 0) {
-        std::cerr << "Could not open input tcp stream: " << input_url << std::endl;
+    // AVInputFormat* input_format = av_find_input_format("rtp");
+    // if (avformat_open_input(&decoder_info.input_fmt_ctx, input_url, input_format, &format_opts) < 0) {
+    //     std::cerr << "Could not open input tcp stream: " << input_url << std::endl;
+    //     av_dict_free(&format_opts);
+    //     return false;
+    // }
+
+    std::string sdp_file = "stream_ul.sdp";
+    int ret = avformat_open_input(&decoder_info.input_fmt_ctx, sdp_file.c_str(), nullptr, &format_opts);
+    if (ret < 0) {
+        std::cerr << "Could not open SDP file: " << get_error_text(ret) << std::endl;
         av_dict_free(&format_opts);
         return false;
     }
@@ -906,7 +915,7 @@ int main(int argc, char* argv[]) {
     // Maximum of 6 output URLs supported
     if (argc < 3) {
         std::cerr << "Usage: " << argv[0] 
-                  << " rtsp://192.168.2.3:9000/stream rtp://192.168.2.2:5004" 
+                  << " rtp://192.168.2.3:9000 rtp://192.168.2.2:5004" 
                   << std::endl;
         std::cerr << "Supported Resolutions (in order):" << std::endl;
         std::cerr << "1. 3840x2160" << std::endl;
