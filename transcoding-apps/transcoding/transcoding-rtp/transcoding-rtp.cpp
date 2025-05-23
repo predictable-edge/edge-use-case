@@ -280,7 +280,8 @@ bool initialize_decoder(const char* input_url, DecoderInfo& decoder_info) {
     // av_dict_set(&format_opts, "rtsp_flags", "prefer_tcp", 0);    // Prefer TCP for RTSP control connection
     av_dict_set(&format_opts, "buffer_size", "8192000", 0);      // Increase buffer size
     av_dict_set(&format_opts, "max_delay", "500000", 0);         // 500ms max delay
-    av_dict_set(&format_opts, "reorder_queue_size", "10", 0);    // Reorder queue size
+    av_dict_set(&format_opts, "reorder_queue_size", "100000", 0);    // Reorder queue size
+    av_dict_set(&format_opts, "jitter_buffer_size", "100000", 0);    // Jitter buffer size
     av_dict_set(&format_opts, "stimeout", "5000000", 0);         // Socket timeout 5 seconds
     av_dict_set(&format_opts, "listen_timeout", "5000000", 0);   // Connection timeout 5 seconds
     av_dict_set(&format_opts, "probesize", "32648", 0);          // Probe size 32648
