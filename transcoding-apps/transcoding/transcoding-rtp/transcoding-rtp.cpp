@@ -175,15 +175,8 @@ private:
 // Thread-safe vector to store timing information
 class TimingLogger {
 public:
-    TimingLogger(const std::string& log_filename) : filename_(log_filename) {}
-
-    void add_entry(int frame_number, double decode_time_ms, double encode_time_ms, double interval_ms) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        log_entries.emplace_back(frame_number, decode_time_ms, encode_time_ms, interval_ms);
-    }
-
-    void write_to_file() {
-        std::lock_guard<std::mutex> lock(mutex_);
+    TimingLogger(const std::string& log_filename) : filename_(log_filename) {
+        // Create directory if it doesn't exist
         std::filesystem::path filepath(filename_);
         std::filesystem::path parent_path = filepath.parent_path();
         try {
@@ -193,33 +186,47 @@ public:
             }
         } catch (const std::filesystem::filesystem_error& e) {
             std::cerr << "Filesystem error: " << e.what() << std::endl;
-            return;
         }
-        std::ofstream ofs(filename_);
-        if (!ofs.is_open()) {
-            std::cerr << "Failed to open " << filename_ << " for writing." << std::endl;
-            return;
+
+        // Create file and write header if it doesn't exist
+        if (!std::filesystem::exists(filename_)) {
+            std::ofstream ofs(filename_);
+            if (ofs.is_open()) {
+                ofs << std::fixed << std::setprecision(4);
+                ofs << std::left << std::setw(10) << "Frame" 
+                    << std::left << std::setw(20) << "Decode Time (ms)" 
+                    << std::left << std::setw(20) << "Encode Time (ms)" 
+                    << std::left << std::setw(20) << "Transcode Time (ms)" 
+                    << "\n";
+                ofs.close();
+            }
         }
-        ofs << std::fixed << std::setprecision(4);
+    }
 
-        // Write header
-        ofs << std::left << std::setw(10) << "Frame" 
-            << std::left << std::setw(20) << "Decode Time (ms)" 
-            << std::left << std::setw(20) << "Encode Time (ms)" 
-            << std::left << std::setw(20) << "Transcode Time (ms)" 
-            << "\n";
-
-        // Write each entry
-        for (const auto& entry : log_entries) {
-            ofs << std::left << std::setw(10) << entry.frame_number
-                << std::left << std::setw(20) << entry.decode_time_ms
-                << std::left << std::setw(20) << entry.encode_time_ms
-                << std::left << std::setw(20) << entry.interval_ms
+    void add_entry(int frame_number, double decode_time_ms, double encode_time_ms, double interval_ms) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        
+        // Write entry immediately to file
+        std::ofstream ofs(filename_, std::ios::app);
+        if (ofs.is_open()) {
+            ofs << std::fixed << std::setprecision(4);
+            ofs << std::left << std::setw(10) << frame_number
+                << std::left << std::setw(20) << decode_time_ms
+                << std::left << std::setw(20) << encode_time_ms
+                << std::left << std::setw(20) << interval_ms
                 << "\n";
+            ofs.close();
+        } else {
+            std::cerr << "Failed to open " << filename_ << " for writing." << std::endl;
         }
 
-        ofs.close();
-        std::cout << "Timing information written to " << filename_ << std::endl;
+        // Also keep in memory for potential future use
+        log_entries.emplace_back(frame_number, decode_time_ms, encode_time_ms, interval_ms);
+    }
+
+    void write_to_file() {
+        // No need to write again as we're writing immediately
+        std::cout << "Timing information has been written to " << filename_ << std::endl;
     }
 
 private:
@@ -862,7 +869,7 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, std::at
         double interval_time = std::chrono::duration<double, std::milli>(encode_end - frame_data.decode_start_time).count();
 
         frame_count += 2;
-        logger.add_entry(frame_count, decode_time, encode_time, interval_time);
+        logger.add_entry(frame_count / 2, decode_time, encode_time, interval_time);
 
         if (frame_count % 100 == 0) {
             std::cout << "Encoded " << frame_count << " frames for " << config.output_url << ", queue length: " << frame_queue.size() << std::endl;
