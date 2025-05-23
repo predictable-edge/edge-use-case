@@ -246,6 +246,8 @@ bool initialize_decoder(const char* input_url, DecoderInfo& decoder_info) {
     av_dict_set(&format_opts, "reorder_queue_size", "10", 0);    // Reorder queue size
     av_dict_set(&format_opts, "stimeout", "5000000", 0);         // Socket timeout 5 seconds
     av_dict_set(&format_opts, "listen_timeout", "5000000", 0);   // Connection timeout 5 seconds
+    av_dict_set(&format_opts, "probesize", "32648", 0);          // Probe size 32648
+    av_dict_set(&format_opts, "analyzeduration", "0", 0);        // Analyze duration 0 second
     
     // Set input format to RTSP
     AVInputFormat* input_format = av_find_input_format("rtsp");
@@ -461,6 +463,39 @@ bool decode_frames(DecoderInfo decoder_info, std::vector<FrameQueue*>& encoder_q
     decode_finished = true;
     std::cout << "Decoding finished." << std::endl;
     return true;
+}
+
+AVPacket* create_timestamp_packet(const AVPacket* base ,uint64_t ts_us)
+{
+    static const uint8_t SEI_PREFIX[5] = {0,0,0,1,0x06};
+    static const uint8_t AUD_NAL[6]    = {0,0,0,1,0x09,0x10};
+
+    const int SIZE = 16 + 6;
+
+    AVPacket* pkt = av_packet_alloc();
+    if (!pkt) return nullptr;
+    if (av_packet_copy_props(pkt, base) < 0) { av_packet_free(&pkt); return nullptr; }
+
+    uint8_t* data = (uint8_t*)av_malloc(SIZE);
+    if (!data){ av_packet_free(&pkt); return nullptr; }
+    uint8_t* p = data;
+
+    memcpy(p, SEI_PREFIX, 5);  p += 5;
+    *p++ = 5;
+    *p++ = 8;
+    for (int i = 7; i >= 0; --i) *p++ = (ts_us >> (i*8)) & 0xFF;
+    *p++ = 0x80;
+
+    memcpy(p, AUD_NAL, sizeof(AUD_NAL));
+    pkt->data = data;
+    pkt->size = SIZE;
+    pkt->buf  = av_buffer_create(data, SIZE, av_buffer_default_free, nullptr, 0);
+
+    pkt->pts   = base->pts + 1;
+    pkt->dts   = base->dts + 1;
+    pkt->flags = 0;
+    pkt->stream_index = base->stream_index;
+    return pkt;
 }
 
 // Encoder Function with Initialization and Scaling
@@ -731,6 +766,14 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, AVRatio
                 std::cerr << "Error writing packet to output for " << config.output_url << ": " << get_error_text(write_ret) << std::endl;
                 av_packet_free(&enc_pkt);
                 break;
+            }
+            AVPacket* empty_pkt = create_timestamp_packet(enc_pkt, get_current_time_us());
+            if (empty_pkt) {
+                int empty_write_ret = av_write_frame(output_fmt_ctx, empty_pkt);
+                if (empty_write_ret < 0) {
+                    std::cerr << "Error writing empty packet to output" << std::endl;
+                }
+                av_packet_free(&empty_pkt);
             }
             std::cout << "Encoded frame " << frame_count + 1 << " at " << get_current_time_us() << std::endl;
             av_packet_free(&enc_pkt);
