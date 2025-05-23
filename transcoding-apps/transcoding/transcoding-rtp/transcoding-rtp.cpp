@@ -1037,7 +1037,7 @@ int main(int argc, char* argv[]) {
     };
 
     std::vector<ResolutionBitrateLog> resolution_bitrate_log = {
-        {3840, 2160, 16000,  "frame-1"},
+        {1920, 1080, 8000,  "frame-1"},
         {2560, 1440, 10000,  "frame-2"},
         {1920, 1080, 5000,  "frame-3"},
         {1280, 720,  2500,  "frame-4"},
