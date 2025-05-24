@@ -95,7 +95,7 @@ int max_wait_time_seconds = 10;  // Maximum time to wait after all frames are se
 // Class for handling latency measurements and file output
 class LatencyLogger {
 public:
-    LatencyLogger(const std::string& log_filename) : filename_(log_filename) {
+    LatencyLogger(const std::string& log_filename) : filename_(log_filename), ofs_(log_filename, std::ios::out) {
         // Create directory if it doesn't exist
         std::filesystem::path filepath(filename_);
         std::filesystem::path parent_path = filepath.parent_path();
@@ -106,6 +106,20 @@ public:
             }
         } catch (const std::filesystem::filesystem_error& e) {
             std::cerr << "Filesystem error: " << e.what() << std::endl;
+        }
+        if (!ofs_.is_open()) {
+            std::cerr << "Failed to open " << filename_ << " for writing." << std::endl;
+        } else {
+            ofs_ << std::left << std::setw(10) << "Frame"
+                 << std::left << std::setw(20) << "E2E latency(ms)"
+                 << "\n";
+            ofs_.flush();
+        }
+    }
+
+    ~LatencyLogger() {
+        if (ofs_.is_open()) {
+            ofs_.close();
         }
     }
 
@@ -121,8 +135,16 @@ public:
         min_latency_ms_ = std::min(min_latency_ms_, latency_ms);
         max_latency_ms_ = std::max(max_latency_ms_, latency_ms);
         
-        // Store entry
-        entries_.push_back({frame_number, latency_ms});
+        // 实时写入文件
+        {
+            std::lock_guard<std::mutex> lock(file_mutex_);
+            if (ofs_.is_open()) {
+                ofs_ << std::left << std::setw(10) << frame_number
+                     << std::left << std::setw(20) << std::to_string(latency_ms) + " ms"
+                     << "\n";
+                ofs_.flush();
+            }
+        }
         
         // Log to console periodically
         if (frame_number % 30 == 0) {
@@ -136,26 +158,8 @@ public:
         frames_processed++;
     }
 
-    void write_to_file() {
-        std::ofstream ofs(filename_);
-        if (!ofs.is_open()) {
-            std::cerr << "Failed to open " << filename_ << " for writing." << std::endl;
-            return;
-        }
-
-        ofs << std::left << std::setw(10) << "Frame" 
-            << std::left << std::setw(20) << "E2E latency(ms)" 
-            << "\n";
-
-        for (const auto& entry : entries_) {
-            ofs << std::left << std::setw(10) << entry.frame_number
-                << std::left << std::setw(20) << std::to_string(entry.latency_ms) + " ms"
-                << "\n";
-        }
-
-        ofs.close();
-        std::cout << "Timing information written to " << filename_ << std::endl;
-    }
+    // write_to_file 变为空实现
+    void write_to_file() {}
 
     void print_summary() {
         if (frame_count_ > 0) {
@@ -177,8 +181,9 @@ private:
         double latency_ms;
     };
 
-    std::vector<LatencyEntry> entries_;
     std::string filename_;
+    std::ofstream ofs_;
+    std::mutex file_mutex_;
     int frame_count_ = 0;
     double total_latency_ms_ = 0.0;
     double min_latency_ms_ = DBL_MAX;
