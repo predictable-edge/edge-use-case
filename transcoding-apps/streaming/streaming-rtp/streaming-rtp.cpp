@@ -35,7 +35,7 @@ extern "C" {
 }
 
 // Forward declarations
-int64_t extract_timestamp_from_packet(AVPacket* pkt);
+int64_t extract_frame_id_from_packet(AVPacket* pkt);
 
 #define CHECK_ERR(err, msg) \
     if ((err) < 0) { \
@@ -68,7 +68,7 @@ std::string get_timestamp_with_ms() {
     auto now_time_t = std::chrono::system_clock::to_time_t(now);
     std::tm* now_tm = std::localtime(&now_time_t);
     char buffer[20];
-    std::strftime(buffer, sizeof(buffer), "%Y%m%d-%H%M%S", now_tm);
+    std::strftime(buffer, sizeof(buffer), "%Y%m%d_%H%M%S", now_tm);
     std::ostringstream oss;
     oss << buffer << std::setw(3) << std::setfill('0') << ms_part.count();
     return oss.str();
@@ -236,8 +236,7 @@ void* pull_stream(void* args) {
 
     // Create a TimingLogger instance for this pull thread
     std::stringstream ss;
-    ss <<  "result/task" << num_pull << "/" << get_timestamp_with_ms() << "/"
-       << "frame-" << index << ".log"; 
+    ss <<  "result/latency_" << get_timestamp_with_ms() << ".txt"; 
     std::string log_filename = ss.str();
     TimingLogger logger(log_filename);
 
@@ -453,32 +452,25 @@ void* pull_stream(void* args) {
 
         if (packet->stream_index == video_stream_index) {
             // Extract embedded timestamp from packet
-            int64_t embedded_timestamp = extract_timestamp_from_packet(packet);
+            int64_t embedded_frame_id = extract_frame_id_from_packet(packet);
             
             int64_t pull_time_ms_before_dec = get_current_time_us() / 1000;
             int64_t pull_time_ms = get_current_time_us() / 1000;
-            
-            if (embedded_timestamp > 0) {
-                int64_t latency_us = get_current_time_us() - embedded_timestamp;
-                pthread_mutex_lock(&cout_mutex);
-                std::cout << "Frame " << frame_count + 1 << " pulled at " << get_current_time_us() 
-                          << ", embedded timestamp: " << embedded_timestamp
-                          << ", latency: " << latency_us << " us (" << (latency_us/1000.0) << " ms)" << std::endl;
-                pthread_mutex_unlock(&cout_mutex);
-            } else {
-                std::cout << "Frame " << frame_count + 1 << " pulled at " << get_current_time_us() 
-                          << " (no valid embedded timestamp)" << std::endl;
-            }
 
-            // Add entry to TimingLogger
-            logger.add_entry(
-                static_cast<int>(frame_count + 1),
-                push_timestamps[frame_count],
-                pull_time_ms,
-                push_timestamps_after_enc[frame_count],
-                pull_time_ms_before_dec
-            );
-            frame_count++;
+            
+            if (embedded_frame_id < 10000 && embedded_frame_id > 0) {
+                std::cout << "Frame " << embedded_frame_id << " pulled at " << get_current_time_us() << std::endl;
+
+                // Add entry to TimingLogger
+                logger.add_entry(
+                    static_cast<int>(embedded_frame_id),
+                    push_timestamps[embedded_frame_id - 1],
+                    pull_time_ms,
+                    push_timestamps_after_enc[embedded_frame_id - 1],
+                    pull_time_ms_before_dec
+                );
+                frame_count++;
+            }
         }
 
         av_packet_unref(packet);
@@ -719,7 +711,7 @@ void* push_stream_directly(void* args) {
 }
 
 // Function to extract timestamp from packet and restore original packet
-int64_t extract_timestamp_from_packet(AVPacket* pkt) {
+int64_t extract_frame_id_from_packet(AVPacket* pkt) {
     // Check if packet is large enough to contain timestamp
     if (pkt->size <= static_cast<int>(sizeof(int64_t))) {
         std::cerr << "Packet too small to contain timestamp" << std::endl;
@@ -727,8 +719,8 @@ int64_t extract_timestamp_from_packet(AVPacket* pkt) {
     }
     
     // Extract timestamp from the end of packet data
-    int64_t timestamp;
-    memcpy(&timestamp, pkt->data + pkt->size - sizeof(int64_t), sizeof(int64_t));
+    int64_t frame_id;
+    memcpy(&frame_id, pkt->data + pkt->size - sizeof(int64_t), sizeof(int64_t));
     
     // Create a new packet for the original data (without timestamp)
     AVPacket* new_pkt = av_packet_alloc();
@@ -766,7 +758,7 @@ int64_t extract_timestamp_from_packet(AVPacket* pkt) {
     // Free the new packet structure (data has been moved to original packet)
     av_packet_free(&new_pkt);
     
-    return timestamp;
+    return frame_id;
 }
 
 void send_ping_and_wait_pong_from_url(const char* local_url, const char* remote_url) {

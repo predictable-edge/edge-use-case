@@ -34,7 +34,7 @@ extern "C" {
 std::string get_error_text(int errnum);
 std::string get_timestamp_with_ms();
 int64_t get_current_time_us();
-void add_timestamp_to_packet(AVPacket* pkt);
+void add_frame_index_to_packet(AVPacket* pkt, uint64_t frame_index);
 
 // Global variables for decoder information with synchronization
 struct GlobalDecoderInfo {
@@ -69,7 +69,7 @@ std::string get_timestamp_with_ms() {
     auto now_time_t = std::chrono::system_clock::to_time_t(now);
     std::tm* now_tm = std::localtime(&now_time_t);
     char buffer[20];
-    std::strftime(buffer, sizeof(buffer), "%Y%m%d-%H%M%S", now_tm);
+    std::strftime(buffer, sizeof(buffer), "%Y%m%d_%H%M%S", now_tm);
     std::ostringstream oss;
     oss << buffer << std::setw(3) << std::setfill('0') << ms_part.count();
     return oss.str();
@@ -84,6 +84,8 @@ int64_t get_current_time_us() {
 // Structure to hold frame data and timing information
 struct FrameData {
     AVFrame* frame;
+    uint64_t frame_index;
+    std::chrono::steady_clock::time_point packet_read_time;
     std::chrono::steady_clock::time_point decode_start_time;
     std::chrono::steady_clock::time_point decode_end_time;
 };
@@ -135,22 +137,28 @@ private:
     bool finished_ = false;
 };
 
+// Structure to hold packet and its read time
+struct PacketInfo {
+    AVPacket* packet;
+    std::chrono::steady_clock::time_point read_time;
+};
+
 // Thread-safe queue for AVPacket*
 class PacketQueue {
 public:
-    void push(AVPacket* packet) {
+    void push(const PacketInfo& packet_info) {
         std::lock_guard<std::mutex> lock(mutex_);
-        queue_.push(packet);
+        queue_.push(packet_info);
         cond_var_.notify_one();
     }
 
-    bool pop(AVPacket*& packet) {
+    bool pop(PacketInfo& packet_info) {
         std::unique_lock<std::mutex> lock(mutex_);
         while (queue_.empty() && !finished_) {
             cond_var_.wait(lock);
         }
         if (queue_.empty()) return false;
-        packet = queue_.front();
+        packet_info = queue_.front();
         queue_.pop();
         return true;
     }
@@ -166,7 +174,7 @@ public:
     }
 
 private:
-    std::queue<AVPacket*> queue_;
+    std::queue<PacketInfo> queue_;
     std::mutex mutex_;
     std::condition_variable cond_var_;
     bool finished_ = false;
@@ -405,6 +413,8 @@ void packet_reading_thread(AVFormatContext* input_fmt_ctx, int video_stream_idx,
     // int frame_count = 0;
     while (true) {
         int ret = av_read_frame(input_fmt_ctx, packet);
+        auto packet_read_actual_time = std::chrono::steady_clock::now();
+
         if (ret < 0) {
             if (ret == AVERROR_EOF) break;
             std::cerr << "Error reading frame: " << get_error_text(ret) << std::endl;
@@ -414,7 +424,8 @@ void packet_reading_thread(AVFormatContext* input_fmt_ctx, int video_stream_idx,
         // std::cout << "Frame " << frame_count << " read at " << get_current_time_us() << std::endl;
 
         if (packet->stream_index == video_stream_idx) {
-            packet_queue.push(packet);
+            PacketInfo p_info = {packet, packet_read_actual_time};
+            packet_queue.push(p_info);
             packet = av_packet_alloc();
             if (!packet) {
                 std::cerr << "Could not allocate AVPacket" << std::endl;
@@ -432,22 +443,22 @@ void packet_reading_thread(AVFormatContext* input_fmt_ctx, int video_stream_idx,
 }
 
 void decoding_thread(AVCodecContext* decoder_ctx, PacketQueue& packet_queue, const std::vector<FrameQueue*>& encoder_queues) {
-    AVPacket* packet = nullptr;
+    PacketInfo packet_info;
     AVFrame* frame = av_frame_alloc();
     if (!frame) {
         std::cerr << "Could not allocate AVFrame" << std::endl;
         for (auto& q : encoder_queues) q->set_finished();
         return;
     }
-    while (packet_queue.pop(packet)) {
+    while (packet_queue.pop(packet_info)) {
         auto decode_start = std::chrono::steady_clock::now();
-        int ret = avcodec_send_packet(decoder_ctx, packet);
-        av_packet_free(&packet);
+        int ret = avcodec_send_packet(decoder_ctx, packet_info.packet);
+        av_packet_free(&packet_info.packet);
         if (ret < 0) {
             std::cerr << "Error sending packet to decoder: " << get_error_text(ret) << std::endl;
             continue;
         }
-
+        uint64_t frame_index = 0;
         while (ret >= 0) {
             ret = avcodec_receive_frame(decoder_ctx, frame);
             if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
@@ -456,6 +467,13 @@ void decoding_thread(AVCodecContext* decoder_ctx, PacketQueue& packet_queue, con
             else if (ret < 0) {
                 std::cerr << "Error receiving frame from decoder: " << get_error_text(ret) << std::endl;
                 break;
+            }
+
+            if (frame->pts != AV_NOPTS_VALUE) {
+                frame_index = (frame->pts - 1) / 1500 + 2;
+            }
+            else {
+                frame_index = 1;
             }
 
             auto decode_end = std::chrono::steady_clock::now();
@@ -467,9 +485,11 @@ void decoding_thread(AVCodecContext* decoder_ctx, PacketQueue& packet_queue, con
                     continue;
                 }
                 FrameData frame_data;
+                frame_data.frame_index = frame_index;
                 frame_data.frame = cloned_frame;
                 frame_data.decode_start_time = decode_start;
                 frame_data.decode_end_time = decode_end;
+                frame_data.packet_read_time = packet_info.read_time;
                 q->push(frame_data);
             }
             av_frame_unref(frame);
@@ -496,6 +516,7 @@ void decoding_thread(AVCodecContext* decoder_ctx, PacketQueue& packet_queue, con
             frame_data.frame = cloned_frame;
             frame_data.decode_start_time = std::chrono::steady_clock::now();;
             frame_data.decode_end_time = std::chrono::steady_clock::now();;
+            frame_data.packet_read_time = frame_data.decode_start_time;
             q->push(frame_data);
         }
         av_frame_unref(frame);
@@ -841,7 +862,7 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, std::at
             enc_pkt->stream_index = out_stream->index;
 
             // Add timestamp directly to packet data
-            add_timestamp_to_packet(enc_pkt);
+            add_frame_index_to_packet(enc_pkt, frame_data.frame_index);
 
             // Write packet to output - using interleaved write to properly handle timestamp ordering
             int write_ret = av_write_frame(output_fmt_ctx, enc_pkt);
@@ -858,7 +879,7 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, std::at
                 }
                 av_packet_free(&empty_pkt);
             }
-            std::cout << "Encoded frame " << (frame_count + 2) / 2 << " at " << get_current_time_us() << std::endl;
+            std::cout << "Encoded frame " << frame_data.frame_index << " at " << get_current_time_us() << std::endl;
             av_packet_free(&enc_pkt);
         }
 
@@ -867,10 +888,10 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, std::at
         // Calculate timings
         double decode_time = std::chrono::duration<double, std::milli>(frame_data.decode_end_time - frame_data.decode_start_time).count();
         double encode_time = std::chrono::duration<double, std::milli>(encode_end - encode_start).count();
-        double interval_time = std::chrono::duration<double, std::milli>(encode_end - frame_data.decode_start_time).count();
+        double interval_time = std::chrono::duration<double, std::milli>(encode_end - frame_data.packet_read_time).count();
 
         frame_count += 2;
-        logger.add_entry(frame_count / 2, decode_time, encode_time, interval_time);
+        logger.add_entry(frame_data.frame_index, decode_time, encode_time, interval_time);
 
         if (frame_count % 100 == 0) {
             std::cout << "Encoded " << frame_count << " frames for " << config.output_url << ", queue length: " << frame_queue.size() << std::endl;
@@ -909,7 +930,7 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, std::at
         enc_pkt->stream_index = out_stream->index;
 
         // Add timestamp directly to packet data
-        add_timestamp_to_packet(enc_pkt);
+        add_frame_index_to_packet(enc_pkt, 0);
 
         // Write flushed packet to output - using interleaved write to properly handle timestamp ordering
         int write_ret = av_write_frame(output_fmt_ctx, enc_pkt);
@@ -941,8 +962,8 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, std::at
 }
 
 // Add timestamp directly to packet data
-void add_timestamp_to_packet(AVPacket* pkt) {
-    int64_t timestamp = get_current_time_us();
+void add_frame_index_to_packet(AVPacket* pkt, uint64_t frame_index) {
+    int64_t frame_index_int = frame_index;
     
     // Create a new packet
     AVPacket* new_pkt = av_packet_alloc();
@@ -964,7 +985,7 @@ void add_timestamp_to_packet(AVPacket* pkt) {
     memcpy(new_pkt->data, pkt->data, pkt->size);
     
     // Append timestamp to the end of data
-    memcpy(new_pkt->data + pkt->size, &timestamp, sizeof(int64_t));
+    memcpy(new_pkt->data + pkt->size, &frame_index_int, sizeof(int64_t));
     
     // Copy other packet properties
     new_pkt->pts = pkt->pts;
@@ -1081,8 +1102,7 @@ int main(int argc, char* argv[]) {
         config.width = resolution_bitrate_log[i].width;
         config.height = resolution_bitrate_log[i].height;
         config.bitrate = resolution_bitrate_log[i].bitrate_kbps;
-        config.log_filename = "result/task" + std::to_string(num_outputs) + "/" + get_timestamp_with_ms() + "/"
-                              + resolution_bitrate_log[i].log_filename + ".log";
+        config.log_filename = "result/process_" + get_timestamp_with_ms() + ".txt";
         
         // Default framerate (will be updated from decoder)
         config.framerate = 30.0;
