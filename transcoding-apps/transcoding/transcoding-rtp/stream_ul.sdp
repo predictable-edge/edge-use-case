@@ -7,4 +7,4 @@ a=tool:libavformat 58.76.100
 m=video 9000 RTP/AVP 96
 b=AS:8000
 a=rtpmap:96 H264/90000
-a=fmtp:96 packetization-mode=1; sprop-parameter-sets=Z2QANKyzAHgAh9NQkSCUAAADAAQAAAMB4DxgyaA=,aOlwksiw; profile-level-id=640034
+a=fmtp:96 packetization-mode=1; sprop-parameter-sets=Z2QANKyzAHgAh9gIgAAAAwCAAAA8B4wZNA==,aOlzLIs=; profile-level-id=640034
