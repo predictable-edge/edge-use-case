@@ -710,27 +710,37 @@ void* push_stream_directly(void* args) {
     return NULL;
 }
 
-// Function to extract timestamp from packet and restore original packet
+// Function to extract 3 frame indices from packet and restore original packet
 int64_t extract_frame_id_from_packet(AVPacket* pkt) {
-    // Check if packet is large enough to contain timestamp
-    if (pkt->size <= static_cast<int>(sizeof(int64_t))) {
-        std::cerr << "Packet too small to contain timestamp" << std::endl;
+    // Check if packet is large enough to contain 3 frame indices (24 bytes)
+    if (pkt->size <= static_cast<int>(3 * sizeof(int64_t))) {
+        std::cerr << "Packet too small to contain 3 frame indices" << std::endl;
         return -1;
     }
     
-    // Extract timestamp from the end of packet data
-    int64_t frame_id;
-    memcpy(&frame_id, pkt->data + pkt->size - sizeof(int64_t), sizeof(int64_t));
+    // Extract 3 frame indices from the end of packet data
+    int64_t frame_id_1, frame_id_2, frame_id_3;
+    memcpy(&frame_id_1, pkt->data + pkt->size - 3 * sizeof(int64_t), sizeof(int64_t));
+    memcpy(&frame_id_2, pkt->data + pkt->size - 2 * sizeof(int64_t), sizeof(int64_t));
+    memcpy(&frame_id_3, pkt->data + pkt->size - sizeof(int64_t), sizeof(int64_t));
     
-    // Create a new packet for the original data (without timestamp)
+    // Print all 3 extracted frame indices for verification
+    std::cout << "Extracted frame indices: " << frame_id_1 << ", " << frame_id_2 << ", " << frame_id_3 << std::endl;
+    
+    // Verify that the frame indices are consecutive
+    if (frame_id_2 != frame_id_1 + 1 || frame_id_3 != frame_id_1 + 2) {
+        std::cerr << "Warning: Frame indices are not consecutive as expected" << std::endl;
+    }
+    
+    // Create a new packet for the original data (without frame indices)
     AVPacket* new_pkt = av_packet_alloc();
     if (!new_pkt) {
         std::cerr << "Could not allocate new packet" << std::endl;
         return -1;
     }
     
-    // Allocate memory for original data size (excluding timestamp)
-    int original_size = pkt->size - sizeof(int64_t);
+    // Allocate memory for original data size (excluding 3 frame indices)
+    int original_size = pkt->size - 3 * sizeof(int64_t);
     int ret = av_new_packet(new_pkt, original_size);
     if (ret < 0) {
         std::cerr << "Could not allocate packet data" << std::endl;
@@ -738,7 +748,7 @@ int64_t extract_frame_id_from_packet(AVPacket* pkt) {
         return -1;
     }
     
-    // Copy original data (excluding timestamp)
+    // Copy original data (excluding frame indices)
     memcpy(new_pkt->data, pkt->data, original_size);
     
     // Copy other packet properties
@@ -758,7 +768,8 @@ int64_t extract_frame_id_from_packet(AVPacket* pkt) {
     // Free the new packet structure (data has been moved to original packet)
     av_packet_free(&new_pkt);
     
-    return frame_id;
+    // Return the first frame index as the primary identifier
+    return frame_id_1;
 }
 
 void send_ping_and_wait_pong_from_url(const char* local_url, const char* remote_url) {
