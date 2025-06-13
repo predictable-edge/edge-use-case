@@ -36,6 +36,7 @@ extern "C" {
 
 // Forward declarations
 int64_t extract_frame_id_from_packet(AVPacket* pkt, int count = 1);
+void add_frame_index_to_packet(AVPacket* pkt, uint64_t frame_index, int count);
 
 #define CHECK_ERR(err, msg) \
     if ((err) < 0) { \
@@ -232,7 +233,6 @@ struct PullArgs {
 void* pull_stream(void* args) {
     PullArgs* pull_args = static_cast<PullArgs*>(args);
     int index = pull_args->index;
-    int num_pull = pull_args->num_pull;
 
     // Create a TimingLogger instance for this pull thread
     std::stringstream ss;
@@ -452,7 +452,7 @@ void* pull_stream(void* args) {
 
         if (packet->stream_index == video_stream_index) {
             // Extract embedded timestamp from packet
-            int64_t embedded_frame_id = extract_frame_id_from_packet(packet, 4);
+            int64_t embedded_frame_id = extract_frame_id_from_packet(packet, 8);
             
             int64_t pull_time_ms_before_dec = get_current_time_us() / 1000;
             int64_t pull_time_ms = get_current_time_us() / 1000;
@@ -663,6 +663,7 @@ void* push_stream_directly(void* args) {
             int64_t push_time_ms = get_current_time_us() / 1000;
             push_timestamps[frame_count] = push_time_ms;
             push_timestamps_after_enc[frame_count] = push_time_ms;
+            // add_frame_index_to_packet(packet, frame_count, 8);
             ret = av_write_frame(output_fmt_ctx, packet);
             if (ret < 0) {
                 pthread_mutex_lock(&cout_mutex);
@@ -681,7 +682,6 @@ void* push_stream_directly(void* args) {
                 av_packet_free(&empty_pkt);
             }
             frame_count++;
-            // std::cout << "Frame " << frame_count << " pushed at " << get_current_time_us() << std::endl;
         }
         av_packet_unref(packet);
     }
@@ -793,8 +793,8 @@ int64_t extract_frame_id_from_packet(AVPacket* pkt, int expected_count) {
                 data + sei_data_start, sei_raw_size);
             
             // Parse SEI payload
-            int pos_in_sei = 0;
-            while (pos_in_sei < sei_data.size() - 1) {
+            size_t pos_in_sei = 0;
+            while (pos_in_sei < sei_data.size() && pos_in_sei < sei_data.size() - 1) {
                 // Check for trailing bits
                 if (sei_data[pos_in_sei] == 0x80) {
                     break;
@@ -821,7 +821,7 @@ int64_t extract_frame_id_from_packet(AVPacket* pkt, int expected_count) {
                 }
                 
                 // Check if this is our custom SEI (type 5)
-                if (payload_type == 5 && pos_in_sei + payload_size <= sei_data.size()) {
+                if (payload_type == 5 && pos_in_sei + static_cast<size_t>(payload_size) <= sei_data.size()) {
                     // Check UUID
                     bool uuid_match = true;
                     if (payload_size >= 20) {
@@ -847,7 +847,7 @@ int64_t extract_frame_id_from_packet(AVPacket* pkt, int expected_count) {
                             
                             // Debug: show raw bytes after UUID and count
                             std::cout << "Raw bytes after count: ";
-                            for (int k = 0; k < std::min(32, (int)(sei_data.size() - pos_in_sei)); k++) {
+                            for (int k = 0; k < std::min(32, static_cast<int>(sei_data.size() - pos_in_sei)); k++) {
                                 std::cout << std::hex << std::setw(2) << std::setfill('0') 
                                          << (int)sei_data[pos_in_sei + k] << " ";
                             }
@@ -877,7 +877,7 @@ int64_t extract_frame_id_from_packet(AVPacket* pkt, int expected_count) {
                                     break;
                                 }
                                 
-                                if (i * 8 >= remaining_payload) {
+                                if (static_cast<int>(i * 8) >= remaining_payload) {
                                     std::cerr << "Reached end of payload while reading index " 
                                              << i << std::endl;
                                     break;
@@ -974,6 +974,124 @@ int64_t extract_frame_id_from_packet(AVPacket* pkt, int expected_count) {
     }
     
     return frame_indices[0];
+}
+
+// Add frame index to packet data (write specified number of consecutive frame indices)
+void add_frame_index_to_packet(AVPacket* pkt, uint64_t frame_index, int count) {
+    std::vector<uint8_t> sei_payload;
+    
+    // Add UUID
+    sei_payload.insert(sei_payload.end(), FRAME_INDEX_UUID, FRAME_INDEX_UUID + 16);
+    
+    // Add count (4 bytes, big endian)
+    sei_payload.push_back((count >> 24) & 0xFF);
+    sei_payload.push_back((count >> 16) & 0xFF);
+    sei_payload.push_back((count >> 8) & 0xFF);
+    sei_payload.push_back(count & 0xFF);
+    
+    // Add frame indices (8 bytes each, big endian)
+    for (int i = 0; i < count; ++i) {
+        uint64_t current_frame = frame_index + i;
+        for (int j = 7; j >= 0; j--) {
+            sei_payload.push_back((current_frame >> (j * 8)) & 0xFF);
+        }
+    }
+    
+    // Build SEI message with emulation prevention
+    std::vector<uint8_t> sei_message;
+    
+    // SEI payload type: user_data_unregistered (5)
+    sei_message.push_back(0x05);
+    
+    // SEI payload size - IMPORTANT: This is the size WITHOUT emulation prevention
+    int payload_size = sei_payload.size();
+    if (payload_size < 0xFF) {
+        sei_message.push_back(payload_size);
+    } else {
+        // For larger payloads, use 0xFF bytes
+        int remaining = payload_size;
+        while (remaining >= 0xFF) {
+            sei_message.push_back(0xFF);
+            remaining -= 0xFF;
+        }
+        sei_message.push_back(remaining);
+    }
+    
+    // Add the actual payload
+    sei_message.insert(sei_message.end(), sei_payload.begin(), sei_payload.end());
+    
+    // Add rbsp_trailing_bits (0x80)
+    sei_message.push_back(0x80);
+    
+    // Now add emulation prevention to the entire SEI message
+    std::vector<uint8_t> sei_with_emulation;
+    for (size_t i = 0; i < sei_message.size(); i++) {
+        // Check if we need to insert emulation prevention byte
+        if (i >= 2 && 
+            sei_with_emulation.size() >= 2 &&
+            sei_with_emulation[sei_with_emulation.size()-2] == 0x00 &&
+            sei_with_emulation[sei_with_emulation.size()-1] == 0x00 &&
+            sei_message[i] <= 0x03) {
+            // Insert emulation prevention byte 0x03
+            sei_with_emulation.push_back(0x03);
+        }
+        sei_with_emulation.push_back(sei_message[i]);
+    }
+    
+    // Build complete NAL unit
+    std::vector<uint8_t> final_sei_nal;
+    
+    // NAL unit start code (0x00000001)
+    final_sei_nal.push_back(0x00);
+    final_sei_nal.push_back(0x00);
+    final_sei_nal.push_back(0x00);
+    final_sei_nal.push_back(0x01);
+    
+    // NAL unit header for SEI (0x06)
+    final_sei_nal.push_back(0x06);
+    
+    // Add the SEI message with emulation prevention
+    final_sei_nal.insert(final_sei_nal.end(), sei_with_emulation.begin(), sei_with_emulation.end());
+    
+    // Create new packet with SEI + original data
+    AVPacket* new_pkt = av_packet_alloc();
+    if (!new_pkt) {
+        std::cerr << "Could not allocate new packet" << std::endl;
+        return;
+    }
+    
+    int total_size = final_sei_nal.size() + pkt->size;
+    int ret = av_new_packet(new_pkt, total_size + AV_INPUT_BUFFER_PADDING_SIZE);
+    if (ret < 0) {
+        std::cerr << "Could not allocate packet data" << std::endl;
+        av_packet_free(&new_pkt);
+        return;
+    }
+    
+    // Copy SEI data first
+    memcpy(new_pkt->data, final_sei_nal.data(), final_sei_nal.size());
+    
+    // Copy original packet data
+    memcpy(new_pkt->data + final_sei_nal.size(), pkt->data, pkt->size);
+    
+    // Zero out padding
+    memset(new_pkt->data + total_size, 0, AV_INPUT_BUFFER_PADDING_SIZE);
+    
+    // Set packet size (excluding padding)
+    new_pkt->size = total_size;
+    
+    // Copy other packet properties
+    new_pkt->pts = pkt->pts;
+    new_pkt->dts = pkt->dts;
+    new_pkt->stream_index = pkt->stream_index;
+    new_pkt->flags = pkt->flags;
+    new_pkt->duration = pkt->duration;
+    new_pkt->pos = pkt->pos;
+    
+    // Replace original packet
+    av_packet_unref(pkt);
+    av_packet_move_ref(pkt, new_pkt);
+    av_packet_free(&new_pkt);
 }
 
 void send_ping_and_wait_pong_from_url(const char* local_url, const char* remote_url) {
