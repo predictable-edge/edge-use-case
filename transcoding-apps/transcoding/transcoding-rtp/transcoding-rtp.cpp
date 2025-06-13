@@ -987,44 +987,61 @@ void add_frame_index_to_packet(AVPacket* pkt, uint64_t frame_index, int count) {
         }
     }
     
-    // Build complete SEI NAL unit
-    std::vector<uint8_t> sei_nal;
-    
-    // NAL unit start code (0x00000001)
-    sei_nal.push_back(0x00);
-    sei_nal.push_back(0x00);
-    sei_nal.push_back(0x00);
-    sei_nal.push_back(0x01);
-    
-    // NAL unit header for SEI (0x06)
-    sei_nal.push_back(0x06);
+    // Build SEI message with emulation prevention
+    std::vector<uint8_t> sei_message;
     
     // SEI payload type: user_data_unregistered (5)
-    sei_nal.push_back(0x05);
+    sei_message.push_back(0x05);
     
-    // SEI payload size
+    // SEI payload size - IMPORTANT: This is the size WITHOUT emulation prevention
     int payload_size = sei_payload.size();
     if (payload_size < 0xFF) {
-        sei_nal.push_back(payload_size);
+        sei_message.push_back(payload_size);
     } else {
         // For larger payloads, use 0xFF bytes
         int remaining = payload_size;
         while (remaining >= 0xFF) {
-            sei_nal.push_back(0xFF);
+            sei_message.push_back(0xFF);
             remaining -= 0xFF;
         }
-        sei_nal.push_back(remaining);
+        sei_message.push_back(remaining);
     }
     
     // Add the actual payload
-    sei_nal.insert(sei_nal.end(), sei_payload.begin(), sei_payload.end());
+    sei_message.insert(sei_message.end(), sei_payload.begin(), sei_payload.end());
     
     // Add rbsp_trailing_bits (0x80)
-    sei_nal.push_back(0x80);
+    sei_message.push_back(0x80);
     
-    // Use sei_nal directly without emulation prevention
-    // The extraction function will handle emulation prevention removal
-    std::vector<uint8_t>& final_sei_nal = sei_nal;
+    // Now add emulation prevention to the entire SEI message
+    std::vector<uint8_t> sei_with_emulation;
+    for (size_t i = 0; i < sei_message.size(); i++) {
+        // Check if we need to insert emulation prevention byte
+        if (i >= 2 && 
+            sei_with_emulation.size() >= 2 &&
+            sei_with_emulation[sei_with_emulation.size()-2] == 0x00 &&
+            sei_with_emulation[sei_with_emulation.size()-1] == 0x00 &&
+            sei_message[i] <= 0x03) {
+            // Insert emulation prevention byte 0x03
+            sei_with_emulation.push_back(0x03);
+        }
+        sei_with_emulation.push_back(sei_message[i]);
+    }
+    
+    // Build complete NAL unit
+    std::vector<uint8_t> final_sei_nal;
+    
+    // NAL unit start code (0x00000001)
+    final_sei_nal.push_back(0x00);
+    final_sei_nal.push_back(0x00);
+    final_sei_nal.push_back(0x00);
+    final_sei_nal.push_back(0x01);
+    
+    // NAL unit header for SEI (0x06)
+    final_sei_nal.push_back(0x06);
+    
+    // Add the SEI message with emulation prevention
+    final_sei_nal.insert(final_sei_nal.end(), sei_with_emulation.begin(), sei_with_emulation.end());
     
     // Create new packet with SEI + original data
     AVPacket* new_pkt = av_packet_alloc();
