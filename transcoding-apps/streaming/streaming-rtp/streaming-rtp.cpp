@@ -35,7 +35,7 @@ extern "C" {
 }
 
 // Forward declarations
-int64_t extract_frame_id_from_packet(AVPacket* pkt);
+int64_t extract_frame_id_from_packet(AVPacket* pkt, int count = 1);
 
 #define CHECK_ERR(err, msg) \
     if ((err) < 0) { \
@@ -710,26 +710,40 @@ void* push_stream_directly(void* args) {
     return NULL;
 }
 
-// Function to extract 3 frame indices from packet and restore original packet
-int64_t extract_frame_id_from_packet(AVPacket* pkt) {
-    // Check if packet is large enough to contain 3 frame indices (24 bytes)
-    if (pkt->size <= static_cast<int>(3 * sizeof(int64_t))) {
-        std::cerr << "Packet too small to contain 3 frame indices" << std::endl;
+// Function to extract specified number of frame indices from packet and restore original packet
+int64_t extract_frame_id_from_packet(AVPacket* pkt, int count) {
+    // Check if packet is large enough to contain count frame indices
+    if (pkt->size <= static_cast<int>(count * sizeof(int64_t))) {
+        std::cerr << "Packet too small to contain " << count << " frame indices" << std::endl;
         return -1;
     }
     
-    // Extract 3 frame indices from the end of packet data
-    int64_t frame_id_1, frame_id_2, frame_id_3;
-    memcpy(&frame_id_1, pkt->data + pkt->size - 3 * sizeof(int64_t), sizeof(int64_t));
-    memcpy(&frame_id_2, pkt->data + pkt->size - 2 * sizeof(int64_t), sizeof(int64_t));
-    memcpy(&frame_id_3, pkt->data + pkt->size - sizeof(int64_t), sizeof(int64_t));
+    // Extract count frame indices from the end of packet data
+    std::vector<int64_t> frame_indices(count);
+    for (int i = 0; i < count; ++i) {
+        memcpy(&frame_indices[i], pkt->data + pkt->size - (count - i) * sizeof(int64_t), sizeof(int64_t));
+    }
     
-    // Print all 3 extracted frame indices for verification
-    std::cout << "Extracted frame indices: " << frame_id_1 << ", " << frame_id_2 << ", " << frame_id_3 << std::endl;
+    // Print all extracted frame indices for verification
+    std::cout << "Extracted frame indices: ";
+    for (int i = 0; i < count; ++i) {
+        std::cout << frame_indices[i];
+        if (i < count - 1) std::cout << ", ";
+    }
+    std::cout << std::endl;
     
-    // Verify that the frame indices are consecutive
-    if (frame_id_2 != frame_id_1 + 1 || frame_id_3 != frame_id_1 + 2) {
-        std::cerr << "Warning: Frame indices are not consecutive as expected" << std::endl;
+    // Verify that the frame indices are consecutive (if more than 1)
+    if (count > 1) {
+        bool consecutive = true;
+        for (int i = 1; i < count; ++i) {
+            if (frame_indices[i] != frame_indices[i-1] + 1) {
+                consecutive = false;
+                break;
+            }
+        }
+        if (!consecutive) {
+            std::cerr << "Warning: Frame indices are not consecutive as expected" << std::endl;
+        }
     }
     
     // Create a new packet for the original data (without frame indices)
@@ -739,8 +753,8 @@ int64_t extract_frame_id_from_packet(AVPacket* pkt) {
         return -1;
     }
     
-    // Allocate memory for original data size (excluding 3 frame indices)
-    int original_size = pkt->size - 3 * sizeof(int64_t);
+    // Allocate memory for original data size (excluding count frame indices)
+    int original_size = pkt->size - count * sizeof(int64_t);
     int ret = av_new_packet(new_pkt, original_size);
     if (ret < 0) {
         std::cerr << "Could not allocate packet data" << std::endl;
@@ -769,7 +783,7 @@ int64_t extract_frame_id_from_packet(AVPacket* pkt) {
     av_packet_free(&new_pkt);
     
     // Return the first frame index as the primary identifier
-    return frame_id_1;
+    return frame_indices[0];
 }
 
 void send_ping_and_wait_pong_from_url(const char* local_url, const char* remote_url) {

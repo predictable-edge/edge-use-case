@@ -34,7 +34,7 @@ extern "C" {
 std::string get_error_text(int errnum);
 std::string get_timestamp_with_ms();
 int64_t get_current_time_us();
-void add_frame_index_to_packet(AVPacket* pkt, uint64_t frame_index);
+void add_frame_index_to_packet(AVPacket* pkt, uint64_t frame_index, int count = 1);
 
 // Global variables for decoder information with synchronization
 struct GlobalDecoderInfo {
@@ -862,7 +862,7 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, std::at
             enc_pkt->stream_index = out_stream->index;
 
             // Add timestamp directly to packet data
-            add_frame_index_to_packet(enc_pkt, frame_data.frame_index);
+            add_frame_index_to_packet(enc_pkt, frame_data.frame_index, 8);
 
             // Write packet to output - using interleaved write to properly handle timestamp ordering
             int write_ret = av_write_frame(output_fmt_ctx, enc_pkt);
@@ -930,7 +930,7 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, std::at
         enc_pkt->stream_index = out_stream->index;
 
         // Add timestamp directly to packet data
-        add_frame_index_to_packet(enc_pkt, 0);
+        add_frame_index_to_packet(enc_pkt, 0, 2);
 
         // Write flushed packet to output - using interleaved write to properly handle timestamp ordering
         int write_ret = av_write_frame(output_fmt_ctx, enc_pkt);
@@ -961,8 +961,8 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, std::at
     return true;
 }
 
-// Add frame index to packet data (write 3 consecutive frame indices)
-void add_frame_index_to_packet(AVPacket* pkt, uint64_t frame_index) {
+// Add frame index to packet data (write specified number of consecutive frame indices)
+void add_frame_index_to_packet(AVPacket* pkt, uint64_t frame_index, int count) {
     // Create a new packet
     AVPacket* new_pkt = av_packet_alloc();
     if (!new_pkt) {
@@ -970,8 +970,8 @@ void add_frame_index_to_packet(AVPacket* pkt, uint64_t frame_index) {
         return;
     }
     
-    // Ensure the new packet has enough buffer to hold original data plus 3 frame indices (24 bytes)
-    int new_size = pkt->size + 3 * sizeof(int64_t);
+    // Ensure the new packet has enough buffer to hold original data plus count frame indices
+    int new_size = pkt->size + count * sizeof(int64_t);
     int ret = av_new_packet(new_pkt, new_size);
     if (ret < 0) {
         std::cerr << "Could not allocate packet data" << std::endl;
@@ -982,14 +982,11 @@ void add_frame_index_to_packet(AVPacket* pkt, uint64_t frame_index) {
     // Copy original data
     memcpy(new_pkt->data, pkt->data, pkt->size);
     
-    // Append 3 consecutive frame indices to the end of data
-    int64_t frame_index_1 = static_cast<int64_t>(frame_index);
-    int64_t frame_index_2 = static_cast<int64_t>(frame_index + 1);
-    int64_t frame_index_3 = static_cast<int64_t>(frame_index + 2);
-    
-    memcpy(new_pkt->data + pkt->size, &frame_index_1, sizeof(int64_t));
-    memcpy(new_pkt->data + pkt->size + sizeof(int64_t), &frame_index_2, sizeof(int64_t));
-    memcpy(new_pkt->data + pkt->size + 2 * sizeof(int64_t), &frame_index_3, sizeof(int64_t));
+    // Append count consecutive frame indices to the end of data
+    for (int i = 0; i < count; ++i) {
+        int64_t current_frame_index = static_cast<int64_t>(frame_index + i);
+        memcpy(new_pkt->data + pkt->size + i * sizeof(int64_t), &current_frame_index, sizeof(int64_t));
+    }
     
     // Copy other packet properties
     new_pkt->pts = pkt->pts;
