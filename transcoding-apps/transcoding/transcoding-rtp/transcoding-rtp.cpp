@@ -35,6 +35,7 @@ std::string get_error_text(int errnum);
 std::string get_timestamp_with_ms();
 int64_t get_current_time_us();
 void add_frame_index_to_packet(AVPacket* pkt, uint64_t frame_index, int count = 1);
+int64_t extract_frame_id_from_packet(AVPacket* pkt, int count = 1);
 
 // Global variables for decoder information with synchronization
 struct GlobalDecoderInfo {
@@ -420,6 +421,7 @@ void packet_reading_thread(AVFormatContext* input_fmt_ctx, int video_stream_idx,
             std::cerr << "Error reading frame: " << get_error_text(ret) << std::endl;
             break;
         }
+        // int64_t frame_id = extract_frame_id_from_packet(packet, 4);
         // frame_count++;
         // std::cout << "Frame " << frame_count << " read at " << get_current_time_us() << std::endl;
 
@@ -862,7 +864,7 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, std::at
             enc_pkt->stream_index = out_stream->index;
 
             // Add timestamp directly to packet data
-            add_frame_index_to_packet(enc_pkt, frame_data.frame_index, 4);
+            add_frame_index_to_packet(enc_pkt, frame_data.frame_index, 8);
 
             // Write packet to output - using interleaved write to properly handle timestamp ordering
             int write_ret = av_write_frame(output_fmt_ctx, enc_pkt);
@@ -1082,6 +1084,267 @@ void add_frame_index_to_packet(AVPacket* pkt, uint64_t frame_index, int count) {
     av_packet_unref(pkt);
     av_packet_move_ref(pkt, new_pkt);
     av_packet_free(&new_pkt);
+}
+
+std::vector<uint8_t> remove_emulation_prevention(const uint8_t* data, int size) {
+    std::vector<uint8_t> output;
+    output.reserve(size);
+    
+    int i = 0;
+    while (i < size) {
+        // Check for emulation prevention pattern: 0x00 0x00 0x03
+        if (i + 2 < size && 
+            data[i] == 0x00 && 
+            data[i+1] == 0x00 && 
+            data[i+2] == 0x03) {
+            
+            // Check if next byte exists and is 0x00, 0x01, 0x02, or 0x03
+            if (i + 3 < size && data[i+3] <= 0x03) {
+                // This is an emulation prevention sequence
+                output.push_back(0x00);
+                output.push_back(0x00);
+                i += 3; // Skip the 0x03 emulation prevention byte
+            } else {
+                // Not emulation prevention, just copy
+                output.push_back(data[i]);
+                i++;
+            }
+        } else {
+            output.push_back(data[i]);
+            i++;
+        }
+    }
+    
+    return output;
+}
+
+// Function to extract specified number of frame indices from packet and restore original packet
+int64_t extract_frame_id_from_packet(AVPacket* pkt, int expected_count) {
+    if (!pkt || !pkt->data || pkt->size < 20) {
+        std::cerr << "Invalid packet" << std::endl;
+        return -1;
+    }
+    
+    uint8_t* data = pkt->data;
+    int data_size = pkt->size;
+    
+    std::vector<int64_t> frame_indices;
+    int sei_start = -1;
+    int sei_end = -1;
+    
+    // Find SEI NAL unit
+    for (int pos = 0; pos < data_size - 5; pos++) {
+        // Look for start code
+        if ((pos + 4 < data_size && 
+             data[pos] == 0x00 && data[pos+1] == 0x00 && 
+             data[pos+2] == 0x00 && data[pos+3] == 0x01 && 
+             (data[pos+4] & 0x1F) == 0x06) ||
+            (pos + 3 < data_size && 
+             data[pos] == 0x00 && data[pos+1] == 0x00 && 
+             data[pos+2] == 0x01 && 
+             (data[pos+3] & 0x1F) == 0x06)) {
+            
+            sei_start = pos;
+            int start_code_len = (data[pos+2] == 0x01) ? 3 : 4;
+            int sei_data_start = pos + start_code_len + 1; // After NAL header
+            
+            // Find end of SEI NAL unit
+            sei_end = data_size; // Default to end of packet
+            for (int search_pos = sei_data_start; search_pos < data_size - 3; search_pos++) {
+                if (data[search_pos] == 0x00 && data[search_pos+1] == 0x00 &&
+                    (data[search_pos+2] == 0x00 || data[search_pos+2] == 0x01)) {
+                    sei_end = search_pos;
+                    break;
+                }
+            }
+            
+            // Extract SEI data and remove emulation prevention
+            int sei_raw_size = sei_end - sei_data_start;
+            std::vector<uint8_t> sei_data = remove_emulation_prevention(
+                data + sei_data_start, sei_raw_size);
+            
+            // Parse SEI payload
+            size_t pos_in_sei = 0;
+            while (pos_in_sei < sei_data.size() && pos_in_sei < sei_data.size() - 1) {
+                // Check for trailing bits
+                if (sei_data[pos_in_sei] == 0x80) {
+                    break;
+                }
+                
+                // Read payload type
+                int payload_type = 0;
+                while (pos_in_sei < sei_data.size() && sei_data[pos_in_sei] == 0xFF) {
+                    payload_type += 255;
+                    pos_in_sei++;
+                }
+                if (pos_in_sei < sei_data.size()) {
+                    payload_type += sei_data[pos_in_sei++];
+                }
+                
+                // Read payload size
+                int payload_size = 0;
+                while (pos_in_sei < sei_data.size() && sei_data[pos_in_sei] == 0xFF) {
+                    payload_size += 255;
+                    pos_in_sei++;
+                }
+                if (pos_in_sei < sei_data.size()) {
+                    payload_size += sei_data[pos_in_sei++];
+                }
+                
+                // Check if this is our custom SEI (type 5)
+                if (payload_type == 5 && pos_in_sei + static_cast<size_t>(payload_size) <= sei_data.size()) {
+                    // Check UUID
+                    bool uuid_match = true;
+                    if (payload_size >= 20) {
+                        for (int i = 0; i < 16; i++) {
+                            if (sei_data[pos_in_sei + i] != FRAME_INDEX_UUID[i]) {
+                                uuid_match = false;
+                                break;
+                            }
+                        }
+                        
+                        if (uuid_match) {
+                            // Skip UUID
+                            pos_in_sei += 16;
+                            
+                            // Read count (4 bytes, big endian)
+                            uint32_t count = (sei_data[pos_in_sei] << 24) |
+                                           (sei_data[pos_in_sei + 1] << 16) |
+                                           (sei_data[pos_in_sei + 2] << 8) |
+                                           sei_data[pos_in_sei + 3];
+                            pos_in_sei += 4;
+                            
+                            std::cout << "Found matching UUID, count = " << count << std::endl;
+                            
+                            // Debug: show raw bytes after UUID and count
+                            std::cout << "Raw bytes after count: ";
+                            for (int k = 0; k < std::min(32, static_cast<int>(sei_data.size() - pos_in_sei)); k++) {
+                                std::cout << std::hex << std::setw(2) << std::setfill('0') 
+                                         << (int)sei_data[pos_in_sei + k] << " ";
+                            }
+                            std::cout << std::dec << std::endl;
+                            
+                            // Sanity check
+                            if (count > 100 || count == 0) {
+                                std::cerr << "Invalid count: " << count << std::endl;
+                                break;
+                            }
+                            
+                            // Read frame indices
+                            frame_indices.clear();
+                            int remaining_payload = payload_size - 20; // UUID(16) + count(4)
+                            int expected_indices_size = count * 8;
+                            
+                            if (expected_indices_size > remaining_payload) {
+                                std::cerr << "Warning: Payload size mismatch. Expected " 
+                                         << expected_indices_size << " bytes for indices, but only "
+                                         << remaining_payload << " bytes remain in payload" << std::endl;
+                            }
+                            
+                            for (uint32_t i = 0; i < count; i++) {
+                                if (pos_in_sei + 8 > sei_data.size()) {
+                                    std::cerr << "Reached end of SEI data while reading index " 
+                                             << i << std::endl;
+                                    break;
+                                }
+                                
+                                if (static_cast<int>(i * 8) >= remaining_payload) {
+                                    std::cerr << "Reached end of payload while reading index " 
+                                             << i << std::endl;
+                                    break;
+                                }
+                                
+                                uint64_t frame_idx = 0;
+                                for (int j = 0; j < 8; j++) {
+                                    frame_idx = (frame_idx << 8) | sei_data[pos_in_sei++];
+                                }
+                                frame_indices.push_back(frame_idx);
+                            }
+                            
+                            break; // Found our SEI
+                        }
+                    }
+                    
+                    // Skip this payload
+                    pos_in_sei += payload_size - 16; // Already read 16 bytes of UUID
+                } else {
+                    // Skip this payload
+                    pos_in_sei += payload_size;
+                }
+            }
+            
+            if (!frame_indices.empty()) {
+                break; // Found our data
+            }
+        }
+    }
+    
+    if (frame_indices.empty()) {
+        std::cerr << "No frame index SEI found in packet" << std::endl;
+        return -1;
+    }
+    
+    // Print extracted frame indices
+    std::cout << "Extracted " << frame_indices.size() << " frame indices from SEI: ";
+    for (size_t i = 0; i < frame_indices.size() && i < 10; i++) {
+        std::cout << frame_indices[i];
+        if (i < frame_indices.size() - 1) std::cout << ", ";
+    }
+    if (frame_indices.size() > 10) std::cout << "...";
+    std::cout << std::endl;
+    
+    // Remove SEI from packet
+    if (sei_start >= 0 && sei_end > sei_start) {
+        AVPacket* new_pkt = av_packet_alloc();
+        if (!new_pkt) {
+            std::cerr << "Could not allocate new packet" << std::endl;
+            return frame_indices[0];
+        }
+        
+        int before_size = sei_start;
+        int after_size = data_size - sei_end;
+        int new_size = before_size + after_size;
+        
+        if (new_size <= 0) {
+            std::cerr << "Invalid packet size after SEI removal" << std::endl;
+            av_packet_free(&new_pkt);
+            return frame_indices[0];
+        }
+        
+        int ret = av_new_packet(new_pkt, new_size + AV_INPUT_BUFFER_PADDING_SIZE);
+        if (ret < 0) {
+            std::cerr << "Could not allocate packet data" << std::endl;
+            av_packet_free(&new_pkt);
+            return frame_indices[0];
+        }
+        
+        // Copy data
+        if (before_size > 0) {
+            memcpy(new_pkt->data, data, before_size);
+        }
+        if (after_size > 0) {
+            memcpy(new_pkt->data + before_size, data + sei_end, after_size);
+        }
+        
+        // Zero padding
+        memset(new_pkt->data + new_size, 0, AV_INPUT_BUFFER_PADDING_SIZE);
+        new_pkt->size = new_size;
+        
+        // Copy packet metadata
+        new_pkt->pts = pkt->pts;
+        new_pkt->dts = pkt->dts;
+        new_pkt->stream_index = pkt->stream_index;
+        new_pkt->flags = pkt->flags;
+        new_pkt->duration = pkt->duration;
+        new_pkt->pos = pkt->pos;
+        
+        // Replace packet
+        av_packet_unref(pkt);
+        av_packet_move_ref(pkt, new_pkt);
+        av_packet_free(&new_pkt);
+    }
+    
+    return frame_indices[0];
 }
 
 void wait_for_ping_and_reply_pong() {
