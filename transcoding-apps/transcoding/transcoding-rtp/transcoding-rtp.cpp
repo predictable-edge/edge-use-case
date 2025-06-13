@@ -862,7 +862,7 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, std::at
             enc_pkt->stream_index = out_stream->index;
 
             // Add timestamp directly to packet data
-            add_frame_index_to_packet(enc_pkt, frame_data.frame_index, 8);
+            add_frame_index_to_packet(enc_pkt, frame_data.frame_index, 4);
 
             // Write packet to output - using interleaved write to properly handle timestamp ordering
             int write_ret = av_write_frame(output_fmt_ctx, enc_pkt);
@@ -961,32 +961,97 @@ bool encode_frames(const EncoderConfig& config, FrameQueue& frame_queue, std::at
     return true;
 }
 
+static const uint8_t FRAME_INDEX_UUID[16] = {
+    0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0,
+    0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88
+};
+
 // Add frame index to packet data (write specified number of consecutive frame indices)
 void add_frame_index_to_packet(AVPacket* pkt, uint64_t frame_index, int count) {
-    // Create a new packet
+    std::vector<uint8_t> sei_payload;
+    
+    // Add UUID
+    sei_payload.insert(sei_payload.end(), FRAME_INDEX_UUID, FRAME_INDEX_UUID + 16);
+    
+    // Add count (4 bytes, big endian)
+    sei_payload.push_back((count >> 24) & 0xFF);
+    sei_payload.push_back((count >> 16) & 0xFF);
+    sei_payload.push_back((count >> 8) & 0xFF);
+    sei_payload.push_back(count & 0xFF);
+    
+    // Add frame indices (8 bytes each, big endian)
+    for (int i = 0; i < count; ++i) {
+        uint64_t current_frame = frame_index + i;
+        for (int j = 7; j >= 0; j--) {
+            sei_payload.push_back((current_frame >> (j * 8)) & 0xFF);
+        }
+    }
+    
+    // Build complete SEI NAL unit
+    std::vector<uint8_t> sei_nal;
+    
+    // NAL unit start code (0x00000001)
+    sei_nal.push_back(0x00);
+    sei_nal.push_back(0x00);
+    sei_nal.push_back(0x00);
+    sei_nal.push_back(0x01);
+    
+    // NAL unit header for SEI (0x06)
+    sei_nal.push_back(0x06);
+    
+    // SEI payload type: user_data_unregistered (5)
+    sei_nal.push_back(0x05);
+    
+    // SEI payload size
+    int payload_size = sei_payload.size();
+    if (payload_size < 0xFF) {
+        sei_nal.push_back(payload_size);
+    } else {
+        // For larger payloads, use 0xFF bytes
+        int remaining = payload_size;
+        while (remaining >= 0xFF) {
+            sei_nal.push_back(0xFF);
+            remaining -= 0xFF;
+        }
+        sei_nal.push_back(remaining);
+    }
+    
+    // Add the actual payload
+    sei_nal.insert(sei_nal.end(), sei_payload.begin(), sei_payload.end());
+    
+    // Add rbsp_trailing_bits (0x80)
+    sei_nal.push_back(0x80);
+    
+    // Use sei_nal directly without emulation prevention
+    // The extraction function will handle emulation prevention removal
+    std::vector<uint8_t>& final_sei_nal = sei_nal;
+    
+    // Create new packet with SEI + original data
     AVPacket* new_pkt = av_packet_alloc();
     if (!new_pkt) {
         std::cerr << "Could not allocate new packet" << std::endl;
         return;
     }
     
-    // Ensure the new packet has enough buffer to hold original data plus count frame indices
-    int new_size = pkt->size + count * sizeof(int64_t);
-    int ret = av_new_packet(new_pkt, new_size);
+    int total_size = final_sei_nal.size() + pkt->size;
+    int ret = av_new_packet(new_pkt, total_size + AV_INPUT_BUFFER_PADDING_SIZE);
     if (ret < 0) {
         std::cerr << "Could not allocate packet data" << std::endl;
         av_packet_free(&new_pkt);
         return;
     }
     
-    // Copy original data
-    memcpy(new_pkt->data, pkt->data, pkt->size);
+    // Copy SEI data first
+    memcpy(new_pkt->data, final_sei_nal.data(), final_sei_nal.size());
     
-    // Append count consecutive frame indices to the end of data
-    for (int i = 0; i < count; ++i) {
-        int64_t current_frame_index = static_cast<int64_t>(frame_index + i);
-        memcpy(new_pkt->data + pkt->size + i * sizeof(int64_t), &current_frame_index, sizeof(int64_t));
-    }
+    // Copy original packet data
+    memcpy(new_pkt->data + final_sei_nal.size(), pkt->data, pkt->size);
+    
+    // Zero out padding
+    memset(new_pkt->data + total_size, 0, AV_INPUT_BUFFER_PADDING_SIZE);
+    
+    // Set packet size (excluding padding)
+    new_pkt->size = total_size;
     
     // Copy other packet properties
     new_pkt->pts = pkt->pts;
@@ -996,13 +1061,9 @@ void add_frame_index_to_packet(AVPacket* pkt, uint64_t frame_index, int count) {
     new_pkt->duration = pkt->duration;
     new_pkt->pos = pkt->pos;
     
-    // Release original packet
+    // Replace original packet
     av_packet_unref(pkt);
-    
-    // Move new packet content to original packet
     av_packet_move_ref(pkt, new_pkt);
-    
-    // Free the new packet structure (data has been moved to original packet)
     av_packet_free(&new_pkt);
 }
 
