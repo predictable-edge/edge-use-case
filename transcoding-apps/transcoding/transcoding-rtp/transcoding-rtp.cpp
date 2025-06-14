@@ -421,7 +421,8 @@ void packet_reading_thread(AVFormatContext* input_fmt_ctx, int video_stream_idx,
             std::cerr << "Error reading frame: " << get_error_text(ret) << std::endl;
             break;
         }
-        // int64_t frame_id = extract_frame_id_from_packet(packet, 4);
+        int64_t frame_id = extract_frame_id_from_packet(packet, 4);
+        std::cout << "Frame ID: " << frame_id << std::endl;
         // frame_count++;
         // std::cout << "Frame " << frame_count << " read at " << get_current_time_us() << std::endl;
 
